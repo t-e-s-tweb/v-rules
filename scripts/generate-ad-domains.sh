@@ -10,6 +10,10 @@ cat category-ads-all-raw.txt | sed -e 's/^\(|\|\*\|\.\|\-\|0\.0\.0\.0\|127\.0\.0
 
 gh api https://api.github.com/repos/AdguardTeam/AdGuardSDNSFilter/contents/Filters/exclusions.txt -H "Accept: application/vnd.github.raw" > whitelist-raw.txt
 gh api https://api.github.com/repos/AdguardTeam/AdGuardSDNSFilter/contents/Filters/exceptions.txt -H "Accept: application/vnd.github.raw" >> whitelist-raw.txt
+gh api https://api.github.com/repos/dnswarden/blocklist-staging/contents/whitelist/tinylist.txt -H "Accept: application/vnd.github.raw" >> whitelist-raw.txt
+gh api https://api.github.com/repos/dnswarden/blocklist-staging/contents/whitelist/whitelistcommon.txt -H "Accept: application/vnd.github.raw" >> whitelist-raw.txt
+gh api https://api.github.com/repos/iam-py-test/allowlist/contents/allowlist.txt -H "Accept: application/vnd.github.raw" >> whitelist-raw.txt
+gh api https://api.github.com/repos/hagezi/dns-blocklists/contents/wildcard/whitelist-referral-onlydomains.txt -H "Accept: application/vnd.github.raw" >> whitelist-raw.txt
 
 cat whitelist-raw.txt | sed -e 's/^\(|\|@\|\*\|\.\|\-\|0\.0\.0\.0\|127\.0\.0\.1\)*//g' -e 's/\^.*$//g' -e '/!\|?\|@\|#\|\*\|_\|\\\|\/\|\[\|]\|\[\|\([0-9]\{1,3\}\.\)\{3\}[0-9]\{1,3\}/d' -e '/\.$/d' -e '/^\s*$/d' | awk '{$1=$1};1' | dos2unix | idn2 --no-alabelroundtrip --no-tr46 | LC_ALL=C sort -u > whitelist-temp.txt
 
