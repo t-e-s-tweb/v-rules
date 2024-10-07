@@ -281,7 +281,7 @@
       "action": "output",
       "args": {
         "outputName": "geoip-lite.dat",
-        "wantedList": ["ir", "private"]
+        "wantedList": ["pk", "private"]
       }
     },
     {
@@ -324,7 +324,7 @@
       "args": {
         "outputName": "Country.mmdb",
         "overwriteList": [
-          "ir",
+          "pk",
           "cloudflare",
           "google",
           "amazon",
@@ -349,7 +349,7 @@
       "action": "output",
       "args": {
         "outputName": "Country-lite.mmdb",
-        "wantedList": ["ir", "private"]
+        "wantedList": ["pk", "private"]
       }
     },
     {
