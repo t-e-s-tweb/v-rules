@@ -162,6 +162,7 @@ jobs:
           cp ./release/cryptominers.txt ./v2ray-geosite/data/cryptominers
           cp ./release/social.txt ./v2ray-geosite/data/social
           cp ./release/nsfw.txt ./v2ray-geosite/data/nsfw
+          cp ./release/pktld.txt ./v2ray-geosite/data/pktld
 
           ./geosite --datapath=./v2ray-geosite/data --outputdir=./release --outputname=geosite.dat
 
