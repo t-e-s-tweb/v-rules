@@ -172,6 +172,7 @@ jobs:
           mkdir datalite
           cp ./release/ir-lite.txt datalite/ir
           cp ./release/ads.txt datalite/ads
+          cp ./v2ray-geosite/data/private datalite/private
           ./geosite --datapath=datalite --outputdir=./release --outputname=geosite-lite.dat
 
           mkdir security
