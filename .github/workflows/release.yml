@@ -16,24 +16,27 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Iran-v2ray-rules repository
+      - name: Checkout v-rules repository
         uses: actions/checkout@v4
 
       - name: Checkout geolite2 branch
         uses: actions/checkout@v4
         with:
+          repository: Chocolate4U/Iran-v2ray-rules
           ref: geolite2
           path: geolite2
 
       - name: Checkout ip2location branch
         uses: actions/checkout@v4
         with:
+          repository: Chocolate4U/Iran-v2ray-rules
           ref: ip2location
           path: ip2location
       
       - name: Checkout redundant branch
         uses: actions/checkout@v4
         with:
+          repository: Chocolate4U/Iran-v2ray-rules
           ref: redundant
           path: redundant
 
@@ -176,6 +179,7 @@ jobs:
           cp ./release/malware.txt security/malware
           cp ./release/phishing.txt security/phishing
           cp ./release/cryptominers.txt security/cryptominers
+          cp ./release/pktld.txt security/pktld
           ./geosite --datapath=security --outputdir=./release --outputname=security.dat
 
       - name: Generate sha256sum
