@@ -2,14 +2,20 @@
 
 gh api https://api.github.com/repos/MasterKia/PersianBlocker/contents/PersianBlockerHosts.txt -H "Accept: application/vnd.github.raw" | sed -e 's/^\(|\|\*\|\.\|\-\|0\.0\.0\.0\|127\.0\.0\.1\)*//g' -e 's/\^.*$//g' -e '/!\|?\|@\|#\|\*\|_\|\\\|\/\|\[\|]\|\[\|\([0-9]\{1,3\}\.\)\{3\}[0-9]\{1,3\}/d' -e '/\.$/d' -e '/^\s*$/d' | awk '{$1=$1};1' | dos2unix | idn2 --no-alabelroundtrip --no-tr46 | LC_ALL=C sort -u > ads.txt
 gh api https://api.github.com/repos/MasterKia/PersianBlocker/contents/PersianBlockerHosts.txt -H "Accept: application/vnd.github.raw" > category-ads-all-raw.txt
-gh api https://api.github.com/repos/hagezi/dns-blocklists/contents/wildcard/light-onlydomains.txt -H "Accept: application/vnd.github.raw" >> category-ads-all-raw.txt
+gh api https://api.github.com/repos/hagezi/dns-blocklists/contents/wildcard/pro.mini-onlydomains.txt -H "Accept: application/vnd.github.raw" >> category-ads-all-raw.txt
 gh api https://api.github.com/repos/jerryn70/GoodbyeAds/contents/Extension/GoodbyeAds-Samsung-AdBlock.txt -H "Accept: application/vnd.github.raw" >> category-ads-all-raw.txt
 gh api https://api.github.com/repos/jerryn70/GoodbyeAds/contents/Extension/GoodbyeAds-Xiaomi-Extension.txt -H "Accept: application/vnd.github.raw" >> category-ads-all-raw.txt
+gh api https://api.github.com/repos/m0zgen/dns-hole/contents/dns-blacklist.txt -H "Accept: application/vnd.github.raw" >> category-ads-all-raw.txt
 
 cat category-ads-all-raw.txt | sed -e 's/^\(|\|\*\|\.\|\-\|0\.0\.0\.0\|127\.0\.0\.1\)*//g' -e 's/\^.*$//g' -e '/!\|?\|@\|#\|\*\|_\|\\\|\/\|\[\|]\|\[\|\([0-9]\{1,3\}\.\)\{3\}[0-9]\{1,3\}/d' -e '/\.$/d' -e '/^\s*$/d' | awk '{$1=$1};1' | dos2unix | idn2 --no-alabelroundtrip --no-tr46 | LC_ALL=C sort -u > category-ads-all-temp.txt
 
 gh api https://api.github.com/repos/AdguardTeam/AdGuardSDNSFilter/contents/Filters/exclusions.txt -H "Accept: application/vnd.github.raw" > whitelist-raw.txt
 gh api https://api.github.com/repos/AdguardTeam/AdGuardSDNSFilter/contents/Filters/exceptions.txt -H "Accept: application/vnd.github.raw" >> whitelist-raw.txt
+gh api https://api.github.com/repos/dnswarden/blocklist-staging/contents/whitelist/tinylist.txt -H "Accept: application/vnd.github.raw" >> whitelist-raw.txt
+gh api https://api.github.com/repos/dnswarden/blocklist-staging/contents/whitelist/whitelistcommon.txt -H "Accept: application/vnd.github.raw" >> whitelist-raw.txt
+gh api https://api.github.com/repos/iam-py-test/allowlist/contents/allowlist.txt -H "Accept: application/vnd.github.raw" >> whitelist-raw.txt
+gh api https://api.github.com/repos/hagezi/dns-blocklists/contents/wildcard/whitelist-referral-onlydomains.txt -H "Accept: application/vnd.github.raw" >> whitelist-raw.txt
+gh api https://api.github.com/repos/m0zgen/dns-hole/contents/whitelist.txt -H "Accept: application/vnd.github.raw" >> whitelist-raw.txt
 
 cat whitelist-raw.txt | sed -e 's/^\(|\|@\|\*\|\.\|\-\|0\.0\.0\.0\|127\.0\.0\.1\)*//g' -e 's/\^.*$//g' -e '/!\|?\|@\|#\|\*\|_\|\\\|\/\|\[\|]\|\[\|\([0-9]\{1,3\}\.\)\{3\}[0-9]\{1,3\}/d' -e '/\.$/d' -e '/^\s*$/d' | awk '{$1=$1};1' | dos2unix | idn2 --no-alabelroundtrip --no-tr46 | LC_ALL=C sort -u > whitelist-temp.txt
 
