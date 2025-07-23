@@ -6,6 +6,7 @@ gh api https://api.github.com/repos/hagezi/dns-blocklists/contents/wildcard/pro.
 gh api https://api.github.com/repos/jerryn70/GoodbyeAds/contents/Extension/GoodbyeAds-Samsung-AdBlock.txt -H "Accept: application/vnd.github.raw" >> category-ads-all-raw.txt
 gh api https://api.github.com/repos/jerryn70/GoodbyeAds/contents/Extension/GoodbyeAds-Xiaomi-Extension.txt -H "Accept: application/vnd.github.raw" >> category-ads-all-raw.txt
 gh api https://api.github.com/repos/m0zgen/dns-hole/contents/dns-blacklist.txt -H "Accept: application/vnd.github.raw" >> category-ads-all-raw.txt
+gh api https://api.github.com/repos/m0zgen/dns-hole/contents/malisious.txt -H "Accept: application/vnd.github.raw" >> category-ads-all-raw.txt
 
 cat category-ads-all-raw.txt | sed -e 's/^\(|\|\*\|\.\|\-\|0\.0\.0\.0\|127\.0\.0\.1\)*//g' -e 's/\^.*$//g' -e '/!\|?\|@\|#\|\*\|_\|\\\|\/\|\[\|]\|\[\|\([0-9]\{1,3\}\.\)\{3\}[0-9]\{1,3\}/d' -e '/\.$/d' -e '/^\s*$/d' | awk '{$1=$1};1' | dos2unix | idn2 --no-alabelroundtrip --no-tr46 | LC_ALL=C sort -u > category-ads-all-temp.txt
 
