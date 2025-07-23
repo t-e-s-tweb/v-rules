@@ -174,7 +174,7 @@ jobs:
           cp ./domains/social.txt ./v2ray-geosite/data/social
           cp ./domains/nsfw.txt ./v2ray-geosite/data/nsfw
           cp ./domains/sanctioned.txt ./v2ray-geosite/data/sanctioned
-          cp ./v2ray-geosite/data/private datalite/private
+          
 
           ./geosite --datapath=./v2ray-geosite/data --outputdir=./release --outputname=geosite.dat --exportlists=pktld,category-ir,ads,category-ads-all,malware,phishing,cryptominers,social,nsfw,sanctioned
 
