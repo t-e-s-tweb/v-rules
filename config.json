@@ -448,7 +448,7 @@
       "args": {
         "outputName": "geoip-lite.dat",
         "wantedList": [
-          "ir",
+          "pk",
           "irgfw-block-injected-ips",
           "irgfw-other-injected-ips",
           "irgfw-all-injected-ips",
@@ -501,7 +501,7 @@
       "args": {
         "outputName": "Country.mmdb",
         "overwriteList": [
-          "ir",
+          "pk",
           "amazon",
           "bing",
           "cloudflare",
@@ -527,7 +527,7 @@
       "args": {
         "outputName": "Country-lite.mmdb",
         "wantedList": [
-          "ir",
+          "pk",
           "irgfw-block-injected-ips",
           "irgfw-other-injected-ips",
           "irgfw-all-injected-ips",
