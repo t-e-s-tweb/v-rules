@@ -1,4 +1,4 @@
-domain:.pk
+regexp:\.pk$
 domain:xn--mgbai9azgqp6j
 domain:com.pk
 domain:net.pk
