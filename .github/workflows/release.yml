@@ -178,7 +178,7 @@ jobs:
           cp ./v2ray-geosite/data/youtube datalite/youtube
           cp ./v2ray-geosite/data/private datalite/private
           ./geosite --datapath=datalite --outputdir=./release --outputname=geosite-lite.dat
-          cp ./release/category-ir.txt ./release/ir-lite.txt
+         # cp ./release/category-ir.txt ./release/ir-lite.txt
 
           mkdir security
           cp ./domains/category-ads-all.txt security/category-ads-all
