@@ -449,9 +449,6 @@
         "outputName": "geoip-lite.dat",
         "wantedList": [
           "pk",
-          "irgfw-block-injected-ips",
-          "irgfw-other-injected-ips",
-          "irgfw-all-injected-ips",
           "private"
         ]
       }
