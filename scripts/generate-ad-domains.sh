@@ -1,6 +1,6 @@
 #!/bin/bash
 
-gh api https://api.github.com/repos/hagezi/dns-blocklists/contents/wildcard/multi-onlydomains.txt -H "Accept: application/vnd.github.raw" > category-ads-all-raw.txt
+gh api https://api.github.com/repos/hagezi/dns-blocklists/contents/wildcard/pro.mini-onlydomains.txt -H "Accept: application/vnd.github.raw" > category-ads-all-raw.txt
 gh api https://api.github.com/repos/m0zgen/dns-hole/contents/dns-blacklist.txt -H "Accept: application/vnd.github.raw" >> category-ads-all-raw.txt
 gh api https://api.github.com/repos/m0zgen/dns-hole/contents/malisious.txt -H "Accept: application/vnd.github.raw" >> category-ads-all-raw.txt
 
