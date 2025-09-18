@@ -8,9 +8,15 @@ PERFORMANCE_GRADLE="V2rayNG/gradle.properties"
 # -------- 1. Update build.gradle.kts --------
 echo "Patching $BUILD_GRADLE..."
 # Enable minify + shrink in release
-sed -i "/release\s*{/,/}/ { s/minifyEnabled\s\+false/minifyEnabled true/; s/shrinkResources\s\+false/shrinkResources true/ }" "$BUILD_GRADLE"
+sed -i "/release\s*{/,/}/ { \
+  s/minifyEnabled\s\+false/minifyEnabled true/; \
+  s/shrinkResources\s\+false/shrinkResources true/ \
+}" "$BUILD_GRADLE"
+
 # Ensure debug stays unminified
-sed -i "/debug\s*{/,/}/ { s/minifyEnabled\s\+true/minifyEnabled false/ }" "$BUILD_GRADLE"
+sed -i "/debug\s*{/,/}/ { \
+  s/minifyEnabled\s\+true/minifyEnabled false/ \
+}" "$BUILD_GRADLE"
 
 # -------- 2. Ensure ProGuard rules --------
 echo "Ensuring ProGuard rules..."
@@ -55,7 +61,7 @@ touch "$PROGUARD_FILE"
 
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
-  if ! grep -qF "$line" "$PROGUARD_FILE"; then
+  if ! grep -qF -- "$line" "$PROGUARD_FILE"; then
     echo "$line" >> "$PROGUARD_FILE"
   fi
 done <<< "$PROGUARD_SNIPPET"
