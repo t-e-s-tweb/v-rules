@@ -7,18 +7,15 @@ PERFORMANCE_GRADLE="V2rayNG/gradle.properties"
 
 # -------- 1. Update build.gradle.kts --------
 echo "Patching $BUILD_GRADLE..."
-# Enable minify + shrink in release
 sed -i "/release\s*{/,/}/ { \
   s/minifyEnabled\s\+false/minifyEnabled true/; \
   s/shrinkResources\s\+false/shrinkResources true/ \
 }" "$BUILD_GRADLE"
-
-# Ensure debug stays unminified
 sed -i "/debug\s*{/,/}/ { \
   s/minifyEnabled\s\+true/minifyEnabled false/ \
 }" "$BUILD_GRADLE"
 
-# -------- 2. Ensure ProGuard rules --------
+# -------- 2. Ensure ProGuard rules safely --------
 echo "Ensuring ProGuard rules..."
 PROGUARD_SNIPPET='
 -dontobfuscate
@@ -61,12 +58,12 @@ touch "$PROGUARD_FILE"
 
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
-  if ! grep -qF -- "$line" "$PROGUARD_FILE"; then
+  if ! printf '%s\n' "$line" | grep -qxF -f - "$PROGUARD_FILE"; then
     echo "$line" >> "$PROGUARD_FILE"
   fi
 done <<< "$PROGUARD_SNIPPET"
 
-# -------- 3. Ensure gradle.properties performance settings --------
+# -------- 3. Update gradle.properties --------
 echo "Ensuring gradle.properties..."
 declare -A PERFORMANCE_MAP=(
   ["org.gradle.jvmargs"]="-Xmx4g -XX:+UseParallelGC -Dfile.encoding=UTF-8"
@@ -88,12 +85,22 @@ touch "$PERFORMANCE_GRADLE"
 for key in "${!PERFORMANCE_MAP[@]}"; do
   value="${PERFORMANCE_MAP[$key]}"
   if grep -q "^$key=" "$PERFORMANCE_GRADLE"; then
-    # Update existing value
     sed -i "s|^$key=.*|$key=$value|" "$PERFORMANCE_GRADLE"
   else
-    # Append missing key
     echo "$key=$value" >> "$PERFORMANCE_GRADLE"
   fi
 done
 
-echo "✅ ProGuard + performance configs applied (with updates if needed)."
+# -------- 4. Print patched files --------
+echo
+echo "---- $BUILD_GRADLE ----"
+cat "$BUILD_GRADLE"
+echo
+echo "---- $PROGUARD_FILE ----"
+cat "$PROGUARD_FILE"
+echo
+echo "---- $PERFORMANCE_GRADLE ----"
+cat "$PERFORMANCE_GRADLE"
+
+echo
+echo "✅ ProGuard + performance configs applied and displayed above."
