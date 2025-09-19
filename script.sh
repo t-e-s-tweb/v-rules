@@ -5,25 +5,25 @@ BUILD_GRADLE="V2rayNG/app/build.gradle.kts"
 PROGUARD_FILE="V2rayNG/app/proguard-rules.pro"
 PERFORMANCE_GRADLE="V2rayNG/gradle.properties"
 
-# -------- 1. Update build.gradle.kts --------
 echo "Patching $BUILD_GRADLE..."
 
-# Set isMinifyEnabled = true in release
-sed -i "/release\s*{/,/}/ { \
-  s/isMinifyEnabled\s*=\s*false/isMinifyEnabled = true/ \
-}" "$BUILD_GRADLE"
+# ---------- Build Gradle ----------
 
-# Add isShrinkResources = true if missing in release
-if ! sed -n "/release\s*{/,/}/p" "$BUILD_GRADLE" | grep -q "isShrinkResources"; then
-  sed -i "/release\s*{/,/}/ { /}/i \    isShrinkResources = true" "$BUILD_GRADLE"
+# Release: set isMinifyEnabled = true
+sed -i '' '/release\s*{/,/}/ s/isMinifyEnabled\s*=\s*false/isMinifyEnabled = true/' "$BUILD_GRADLE"
+
+# Release: add isShrinkResources = true if missing
+if ! sed -n '/release\s*{/,/}/p' "$BUILD_GRADLE" | grep -q "isShrinkResources"; then
+  sed -i '' '/release\s*{/,/}/ {/}/i\
+    \    isShrinkResources = true
+  ' "$BUILD_GRADLE"
 fi
 
-# Ensure debug stays unminified
-sed -i "/debug\s*{/,/}/ { \
-  s/isMinifyEnabled\s*=\s*true/isMinifyEnabled = false/ \
-}" "$BUILD_GRADLE"
+# Debug: ensure isMinifyEnabled = false
+sed -i '' '/debug\s*{/,/}/ s/isMinifyEnabled\s*=\s*true/isMinifyEnabled = false/' "$BUILD_GRADLE"
 
-# -------- 2. Ensure ProGuard rules safely --------
+# ---------- ProGuard Rules ----------
+
 echo "Ensuring ProGuard rules..."
 PROGUARD_SNIPPET='
 -dontobfuscate
@@ -71,7 +71,8 @@ while IFS= read -r line; do
   fi
 done <<< "$PROGUARD_SNIPPET"
 
-# -------- 3. Update gradle.properties --------
+# ---------- Gradle Properties ----------
+
 echo "Ensuring gradle.properties..."
 declare -A PERFORMANCE_MAP=(
   ["org.gradle.jvmargs"]="-Xmx4g -XX:+UseParallelGC -Dfile.encoding=UTF-8"
@@ -93,22 +94,25 @@ touch "$PERFORMANCE_GRADLE"
 for key in "${!PERFORMANCE_MAP[@]}"; do
   value="${PERFORMANCE_MAP[$key]}"
   if grep -q "^$key=" "$PERFORMANCE_GRADLE"; then
-    sed -i "s|^$key=.*|$key=$value|" "$PERFORMANCE_GRADLE"
+    sed -i '' "s|^$key=.*|$key=$value|" "$PERFORMANCE_GRADLE"
   else
     echo "$key=$value" >> "$PERFORMANCE_GRADLE"
   fi
 done
 
-# -------- 4. Print patched files --------
-echo
-echo "---- $BUILD_GRADLE ----"
-cat "$BUILD_GRADLE"
-echo
-echo "---- $PROGUARD_FILE ----"
-cat "$PROGUARD_FILE"
-echo
-echo "---- $PERFORMANCE_GRADLE ----"
-cat "$PERFORMANCE_GRADLE"
+# ---------- Print Only Changed Lines ----------
 
 echo
-echo "✅ ProGuard + performance configs applied and displayed above."
+echo "---- Changed lines in $BUILD_GRADLE ----"
+grep -E "isMinifyEnabled|isShrinkResources" "$BUILD_GRADLE"
+
+echo
+echo "---- ProGuard rules added or present in $PROGUARD_FILE ----"
+grep -E "^-dontobfuscate|-keep|-dontwarn" "$PROGUARD_FILE"
+
+echo
+echo "---- Performance settings in $PERFORMANCE_GRADLE ----"
+grep -E "org.gradle.jvmargs|org.gradle.parallel|org.gradle.caching|org.gradle.configureondemand|android.enableR8.fullMode|kotlin.incremental|kotlin.incremental.useClasspathSnapshot|android.enableJetifier|android.useAndroidX|org.gradle.daemon.idletimeout|org.gradle.vfs.watch" "$PERFORMANCE_GRADLE"
+
+echo
+echo "✅ ProGuard + performance configs applied and highlighted above."
