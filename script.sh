@@ -74,7 +74,7 @@ while IFS= read -r line; do
   fi
 done <<< "$PROGUARD_SNIPPET"
 
-# ---------- Gradle properties ----------
+# ---------- Gradle properties (macOS-safe update) ----------
 echo "Ensuring gradle.properties..."
 mkdir -p "$(dirname "$PERFORMANCE_GRADLE")"
 touch "$PERFORMANCE_GRADLE"
@@ -93,15 +93,30 @@ declare -A PERFORMANCE_MAP=(
   ["org.gradle.vfs.watch"]="true"
 )
 
+TMP_FILE="$(mktemp)"
+
+# Read existing lines, update keys, preserve unknown lines
+while IFS= read -r line || [[ -n "$line" ]]; do
+    updated=0
+    for key in "${!PERFORMANCE_MAP[@]}"; do
+        if [[ "$line" == "$key="* ]]; then
+            echo "$key=${PERFORMANCE_MAP[$key]}" >> "$TMP_FILE"
+            unset PERFORMANCE_MAP[$key]
+            updated=1
+            break
+        fi
+    done
+    if [[ $updated -eq 0 ]]; then
+        echo "$line" >> "$TMP_FILE"
+    fi
+done < "$PERFORMANCE_GRADLE"
+
+# Append remaining keys
 for key in "${!PERFORMANCE_MAP[@]}"; do
-  value="${PERFORMANCE_MAP[$key]}"
-  if grep -q "^$key=" "$PERFORMANCE_GRADLE"; then
-    # macOS sed requires -i '' for in-place edit
-    sed -i '' "s|^$key=.*|$key=$value|" "$PERFORMANCE_GRADLE"
-  else
-    echo "$key=$value" >> "$PERFORMANCE_GRADLE"
-  fi
+    echo "$key=${PERFORMANCE_MAP[$key]}" >> "$TMP_FILE"
 done
+
+mv "$TMP_FILE" "$PERFORMANCE_GRADLE"
 
 # ---------- Print only changed lines ----------
 echo
