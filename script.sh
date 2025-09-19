@@ -7,12 +7,20 @@ PERFORMANCE_GRADLE="V2rayNG/gradle.properties"
 
 # -------- 1. Update build.gradle.kts --------
 echo "Patching $BUILD_GRADLE..."
+
+# Set isMinifyEnabled = true in release
 sed -i "/release\s*{/,/}/ { \
-  s/minifyEnabled\s\+false/minifyEnabled true/; \
-  s/shrinkResources\s\+false/shrinkResources true/ \
+  s/isMinifyEnabled\s*=\s*false/isMinifyEnabled = true/ \
 }" "$BUILD_GRADLE"
+
+# Add isShrinkResources = true if missing in release
+if ! sed -n "/release\s*{/,/}/p" "$BUILD_GRADLE" | grep -q "isShrinkResources"; then
+  sed -i "/release\s*{/,/}/ { /}/i \    isShrinkResources = true" "$BUILD_GRADLE"
+fi
+
+# Ensure debug stays unminified
 sed -i "/debug\s*{/,/}/ { \
-  s/minifyEnabled\s\+true/minifyEnabled false/ \
+  s/isMinifyEnabled\s*=\s*true/isMinifyEnabled = false/ \
 }" "$BUILD_GRADLE"
 
 # -------- 2. Ensure ProGuard rules safely --------
