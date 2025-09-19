@@ -27,7 +27,7 @@ in_debug && /}/ { in_debug=0 }
 ' "$BUILD_GRADLE" > "$BUILD_GRADLE.tmp" && mv "$BUILD_GRADLE.tmp" "$BUILD_GRADLE"
 
 # ---------- R8-safe ProGuard rules ----------
-echo "Ensuring ProGuard rules..."
+echo "Ensuring R8-safe ProGuard rules..."
 mkdir -p "$(dirname "$PROGUARD_FILE")"
 touch "$PROGUARD_FILE"
 
@@ -37,20 +37,13 @@ PROGUARD_SNIPPET=$(cat <<'EOF'
 -keep class ** { *; }
 -keep class libv2ray.** { *; }
 
--keepclasseswithmembernames class * {
-    native <methods>;
-}
--keepclassmembers class * {
-    static <fields>;
-    static <methods>;
-}
+-keepclasseswithmembernames class * { native <methods>; }
+-keepclassmembers class * { static <fields>; static <methods>; }
 
 -keep class * extends android.app.Service { *; }
 -keep class * extends android.content.BroadcastReceiver { *; }
 
--keepattributes Signature
--keepattributes InnerClasses
--keepattributes EnclosingMethod
+-keepattributes Signature,InnerClasses,EnclosingMethod
 
 -dontwarn com.squareup.okhttp.CipherSuite
 -dontwarn com.squareup.okhttp.ConnectionSpec
@@ -68,12 +61,19 @@ PROGUARD_SNIPPET=$(cat <<'EOF'
 EOF
 )
 
+# Ensure LF line endings and append missing lines
+TMP_FILE="$(mktemp)"
 while IFS= read -r line; do
     [[ -z "$line" ]] && continue
+    # Remove CR if present
+    line="${line//$'\r'/}"
     if ! grep -qxF "$line" "$PROGUARD_FILE"; then
         echo "$line" >> "$PROGUARD_FILE"
     fi
 done <<< "$PROGUARD_SNIPPET"
+
+# Convert entire ProGuard file to LF endings
+awk '{ sub("\r$", ""); print }' "$PROGUARD_FILE" > "$PROGUARD_FILE.tmp" && mv "$PROGUARD_FILE.tmp" "$PROGUARD_FILE"
 
 # ---------- Gradle properties (macOS-safe update) ----------
 echo "Ensuring gradle.properties..."
@@ -131,4 +131,4 @@ echo "---- Performance settings in $PERFORMANCE_GRADLE ----"
 grep -E "org.gradle.jvmargs|org.gradle.parallel|org.gradle.caching|org.gradle.configureondemand|android.enableR8.fullMode|kotlin.incremental|kotlin.incremental.useClasspathSnapshot|android.enableJetifier|android.useAndroidX|org.gradle.daemon.idletimeout|org.gradle.vfs.watch" "$PERFORMANCE_GRADLE"
 
 echo
-echo "✅ ProGuard + performance configs applied and highlighted above."
+echo "✅ R8-safe ProGuard + performance configs applied and highlighted above."
