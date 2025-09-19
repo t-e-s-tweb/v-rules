@@ -26,9 +26,12 @@ in_debug && /}/ { in_debug=0 }
 { print }
 ' "$BUILD_GRADLE" > "$BUILD_GRADLE.tmp" && mv "$BUILD_GRADLE.tmp" "$BUILD_GRADLE"
 
-# ---------- Ensure ProGuard rules ----------
+# ---------- R8-safe ProGuard rules ----------
 echo "Ensuring ProGuard rules..."
-PROGUARD_SNIPPET='
+mkdir -p "$(dirname "$PROGUARD_FILE")"
+touch "$PROGUARD_FILE"
+
+PROGUARD_SNIPPET=$(cat <<'EOF'
 -dontobfuscate
 
 -keep class ** { *; }
@@ -54,7 +57,7 @@ PROGUARD_SNIPPET='
 -dontwarn com.squareup.okhttp.TlsVersion
 -dontwarn org.bouncycastle.jsse.BCSSLSocket
 -dontwarn org.bouncycastle.jsse.provider.BouncyCastleJsseProvider
--dontwarn org.conscrypt.Conscrypt\$Version
+-dontwarn org.conscrypt.Conscrypt$Version
 -dontwarn org.conscrypt.Conscrypt
 -dontwarn org.conscrypt.ConscryptHostnameVerifier
 -dontwarn org.joda.convert.FromString
@@ -62,16 +65,14 @@ PROGUARD_SNIPPET='
 -dontwarn org.openjsse.javax.net.ssl.SSLParameters
 -dontwarn org.openjsse.javax.net.ssl.SSLSocket
 -dontwarn org.openjsse.net.ssl.OpenJSSE
-'
-
-mkdir -p "$(dirname "$PROGUARD_FILE")"
-touch "$PROGUARD_FILE"
+EOF
+)
 
 while IFS= read -r line; do
-  [[ -z "$line" ]] && continue
-  if ! printf '%s\n' "$line" | grep -qxF -f - "$PROGUARD_FILE"; then
-    echo "$line" >> "$PROGUARD_FILE"
-  fi
+    [[ -z "$line" ]] && continue
+    if ! grep -qxF "$line" "$PROGUARD_FILE"; then
+        echo "$line" >> "$PROGUARD_FILE"
+    fi
 done <<< "$PROGUARD_SNIPPET"
 
 # ---------- Gradle properties (macOS-safe update) ----------
@@ -95,7 +96,6 @@ declare -A PERFORMANCE_MAP=(
 
 TMP_FILE="$(mktemp)"
 
-# Read existing lines, update keys, preserve unknown lines
 while IFS= read -r line || [[ -n "$line" ]]; do
     updated=0
     for key in "${!PERFORMANCE_MAP[@]}"; do
@@ -111,7 +111,6 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     fi
 done < "$PERFORMANCE_GRADLE"
 
-# Append remaining keys
 for key in "${!PERFORMANCE_MAP[@]}"; do
     echo "$key=${PERFORMANCE_MAP[$key]}" >> "$TMP_FILE"
 done
