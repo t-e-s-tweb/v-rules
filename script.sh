@@ -76,6 +76,9 @@ done <<< "$PROGUARD_SNIPPET"
 
 # ---------- Gradle properties ----------
 echo "Ensuring gradle.properties..."
+mkdir -p "$(dirname "$PERFORMANCE_GRADLE")"
+touch "$PERFORMANCE_GRADLE"
+
 declare -A PERFORMANCE_MAP=(
   ["org.gradle.jvmargs"]="-Xmx4g -XX:+UseParallelGC -Dfile.encoding=UTF-8"
   ["org.gradle.parallel"]="true"
@@ -90,12 +93,10 @@ declare -A PERFORMANCE_MAP=(
   ["org.gradle.vfs.watch"]="true"
 )
 
-mkdir -p "$(dirname "$PERFORMANCE_GRADLE")"
-touch "$PERFORMANCE_GRADLE"
-
 for key in "${!PERFORMANCE_MAP[@]}"; do
   value="${PERFORMANCE_MAP[$key]}"
   if grep -q "^$key=" "$PERFORMANCE_GRADLE"; then
+    # macOS sed requires -i '' for in-place edit
     sed -i '' "s|^$key=.*|$key=$value|" "$PERFORMANCE_GRADLE"
   else
     echo "$key=$value" >> "$PERFORMANCE_GRADLE"
