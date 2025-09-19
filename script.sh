@@ -7,23 +7,26 @@ PERFORMANCE_GRADLE="V2rayNG/gradle.properties"
 
 echo "Patching $BUILD_GRADLE..."
 
-# ---------- Build Gradle ----------
+# ---------- Patch release block with awk ----------
+awk -v seen=0 '
+/release[[:space:]]*{/ { in_release=1 }
+/}/ && in_release {
+    if (seen==0) { print "    isShrinkResources = true"; seen=1 }
+    in_release=0
+}
+in_release && /isMinifyEnabled/ { sub(/isMinifyEnabled\s*=\s*false/, "isMinifyEnabled = true") }
+{ print }
+' "$BUILD_GRADLE" > "$BUILD_GRADLE.tmp" && mv "$BUILD_GRADLE.tmp" "$BUILD_GRADLE"
 
-# Release: set isMinifyEnabled = true
-sed -i '' '/release\s*{/,/}/ s/isMinifyEnabled\s*=\s*false/isMinifyEnabled = true/' "$BUILD_GRADLE"
+# ---------- Patch debug block with awk ----------
+awk '
+/debug[[:space:]]*{/ { in_debug=1 }
+in_debug && /isMinifyEnabled/ { sub(/isMinifyEnabled\s*=\s*true/, "isMinifyEnabled = false") }
+in_debug && /}/ { in_debug=0 }
+{ print }
+' "$BUILD_GRADLE" > "$BUILD_GRADLE.tmp" && mv "$BUILD_GRADLE.tmp" "$BUILD_GRADLE"
 
-# Release: add isShrinkResources = true if missing
-if ! sed -n '/release\s*{/,/}/p' "$BUILD_GRADLE" | grep -q "isShrinkResources"; then
-  sed -i '' '/release\s*{/,/}/ {/}/i\
-    \    isShrinkResources = true
-  ' "$BUILD_GRADLE"
-fi
-
-# Debug: ensure isMinifyEnabled = false
-sed -i '' '/debug\s*{/,/}/ s/isMinifyEnabled\s*=\s*true/isMinifyEnabled = false/' "$BUILD_GRADLE"
-
-# ---------- ProGuard Rules ----------
-
+# ---------- Ensure ProGuard rules ----------
 echo "Ensuring ProGuard rules..."
 PROGUARD_SNIPPET='
 -dontobfuscate
@@ -71,8 +74,7 @@ while IFS= read -r line; do
   fi
 done <<< "$PROGUARD_SNIPPET"
 
-# ---------- Gradle Properties ----------
-
+# ---------- Gradle properties ----------
 echo "Ensuring gradle.properties..."
 declare -A PERFORMANCE_MAP=(
   ["org.gradle.jvmargs"]="-Xmx4g -XX:+UseParallelGC -Dfile.encoding=UTF-8"
@@ -100,8 +102,7 @@ for key in "${!PERFORMANCE_MAP[@]}"; do
   fi
 done
 
-# ---------- Print Only Changed Lines ----------
-
+# ---------- Print only changed lines ----------
 echo
 echo "---- Changed lines in $BUILD_GRADLE ----"
 grep -E "isMinifyEnabled|isShrinkResources" "$BUILD_GRADLE"
