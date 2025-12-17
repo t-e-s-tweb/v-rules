@@ -40,11 +40,11 @@ jobs:
           ref: redundant
           path: redundant
 
-      - name: Checkout ito.gov.ir-Mirror repository
-        uses: actions/checkout@v4
-        with:
-          repository: Chocolate4U/ito.gov.ir-Mirror
-          path: ito.gov.ir-Mirror
+      #- name: Checkout ito.gov.ir-Mirror repository
+       # uses: actions/checkout@v4
+       # with:
+       #   repository: Chocolate4U/ito.gov.ir-Mirror
+       #   path: ito.gov.ir-Mirror
       
       - name: Checkout domain-list-community repository
         uses: actions/checkout@v4
@@ -77,15 +77,15 @@ jobs:
       - name: Create domains and release directories
         run: mkdir domains release
 
-      - name: Get messengers IP list
-        run: awk -F"," '{print $2}' ./ito.gov.ir-Mirror/data/Messengers.csv | sed -e '/IP\|\"/d' -e '/^$/d' -e '1d' > messengers-ip.txt
+     # - name: Get messengers IP list
+      #  run: awk -F"," '{print $2}' ./ito.gov.ir-Mirror/data/Messengers.csv | sed -e '/IP\|\"/d' -e '/^$/d' -e '1d' > messengers-ip.txt
 
-      - name: Get domestic CDNs IP list
-        run: |
-          chmod +x ./scripts/generate-domestic-cdn-ips.sh
-          ./scripts/generate-domestic-cdn-ips.sh
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #  - name: Get domestic CDNs IP list
+     #   run: |
+    #      chmod +x ./scripts/generate-domestic-cdn-ips.sh
+    #      ./scripts/generate-domestic-cdn-ips.sh
+    #    env:
+    #      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate ir domains list
         run: |
@@ -129,19 +129,19 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate nsfw domains list
-        run: |
-          chmod +x ./scripts/generate-nsfw-domains.sh
-          ./scripts/generate-nsfw-domains.sh
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+   #   - name: Generate nsfw domains list
+    #    run: |
+    #      chmod +x ./scripts/generate-nsfw-domains.sh
+   #       ./scripts/generate-nsfw-domains.sh
+    #    env:
+    #      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate sanctioned domains list
-        run: |
-          chmod +x ./scripts/generate-sanctioned-domains.sh
-          ./scripts/generate-sanctioned-domains.sh
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+   #   - name: Generate sanctioned domains list
+  #      run: |
+   #       chmod +x ./scripts/generate-sanctioned-domains.sh
+   #       ./scripts/generate-sanctioned-domains.sh
+  #      env:
+   #       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate geoip files
         run: |
