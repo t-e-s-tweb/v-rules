@@ -5,38 +5,37 @@ index 244fcffe..df0c9be6 100644
 @@ -2,7 +2,7 @@ package outbound
  
  import (
-        "context"
--       "sort"
-+       //"sort"
-        "strings"
-        "sync"
+ 	"context"
+-	"sort"
++	//"sort"
+ 	"strings"
+ 	"sync"
  
 @@ -182,7 +182,7 @@ func (m *Manager) Select(selectors []string) []string {
-                }
-        }
+ 		}
+ 	}
  
--       sort.Strings(tags)
-+       //sort.Strings(tags)
-        m.tagsCache.Store(key, tags)
+-	sort.Strings(tags)
++	//sort.Strings(tags)
+ 	m.tagsCache.Store(key, tags)
  
-        return tags
+ 	return tags
 diff --git a/app/router/balancing.go b/app/router/balancing.go
 index 5f8cb1c2..af264c6c 100644
 --- a/app/router/balancing.go
 +++ b/app/router/balancing.go
-@@ -75,10 +75,11 @@ func (s *RoundRobinStrategy) PickOutbound(tags []string) string {
-                return ""
-        }
+@@ -95,10 +95,11 @@ func (s *RoundRobinStrategy) PickOutbound(tags []string) string {
+ 		return ""
+ 	}
  
--       s.mu.Lock()
--       defer s.mu.Unlock()
--       tag := tags[s.index%n]
--       s.index = (s.index + 1) % n
-+       //s.mu.Lock()
-+       //defer s.mu.Unlock()
-+       //tag := tags[s.index%n]
-+       //s.index = (s.index + 1) % n
-+    tag := tags[0]
-        return tag
+-	s.mu.Lock()
+-	defer s.mu.Unlock()
+-	tag := tags[s.index%n]
+-	s.index = (s.index + 1) % n
++	//s.mu.Lock()
++	//defer s.mu.Unlock()
++	//tag := tags[s.index%n]
++	//s.index = (s.index + 1) % n
++	tag := tags[0]
+ 	return tag
  }
- 
