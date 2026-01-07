@@ -1,0 +1,305 @@
+[
+  [
+    "echostreamz.com",
+    {
+      "flag": null,
+      "region": null,
+      "stats": {
+        "version": "2.0",
+        "software": {
+          "name": "invidious",
+          "version": "custom",
+          "branch": "custom"
+        },
+        "openRegistrations": true,
+        "usage": {
+          "users": {
+            "total": 0,
+            "activeHalfyear": 0,
+            "activeMonth": 0
+          }
+        },
+        "metadata": {
+          "updatedAt": 0,
+          "lastChannelRefreshedAt": 0
+        },
+        "playback": {
+          "totalRequests": 0,
+          "successfulRequests": 0,
+          "ratio": 0.0
+        }
+      },
+      "cors": true,
+      "api": true,
+      "type": "https",
+      "uri": "https://echostreamz.com",
+      "monitor": {
+        "token": null,
+        "url": "https://echostreamz.com",
+        "type": "https",
+        "alias": "echostreamz.com",
+        "uptime": null,
+        "down": false,
+        "down_since": null,
+        "up_since": null,
+        "error": null,
+        "period": 300,
+        "string_match": "An alternative front-end to YouTube",
+        "enabled": true,
+        "published": true,
+        "recipients": [],
+        "last_check_at": null,
+        "next_check_at": null,
+        "created_at": null,
+        "mute_until": null,
+        "last_status": 200,
+        "apdex_t": null,
+        "disabled_locations": [],
+        "custom_headers": {},
+        "favicon_url": "https://echostreamz.com/favicon.ico",
+        "http_verb": "GET/HEAD",
+        "http_body": "",
+        "ssl": null,
+        "domain": null
+      }
+    }
+  ],
+  [
+    "yt.omada.cafe",
+    {
+      "flag": null,
+      "region": null,
+      "stats": {
+        "version": "2.0",
+        "software": {
+          "name": "invidious",
+          "version": "custom",
+          "branch": "custom"
+        },
+        "openRegistrations": true,
+        "usage": {
+          "users": {
+            "total": 0,
+            "activeHalfyear": 0,
+            "activeMonth": 0
+          }
+        },
+        "metadata": {
+          "updatedAt": 0,
+          "lastChannelRefreshedAt": 0
+        },
+        "playback": {
+          "totalRequests": 0,
+          "successfulRequests": 0,
+          "ratio": 0.0
+        }
+      },
+      "cors": true,
+      "api": true,
+      "type": "https",
+      "uri": "https://yt.omada.cafe",
+      "monitor": {
+        "token": null,
+        "url": "https://yt.omada.cafe",
+        "type": "https",
+        "alias": "yt.omada.cafe",
+        "uptime": null,
+        "down": false,
+        "down_since": null,
+        "up_since": null,
+        "error": null,
+        "period": 300,
+        "string_match": "An alternative front-end to YouTube",
+        "enabled": true,
+        "published": true,
+        "recipients": [],
+        "last_check_at": null,
+        "next_check_at": null,
+        "created_at": null,
+        "mute_until": null,
+        "last_status": 200,
+        "apdex_t": null,
+        "disabled_locations": [],
+        "custom_headers": {},
+        "favicon_url": "https://yt.omada.cafe/favicon.ico",
+        "http_verb": "GET/HEAD",
+        "http_body": "",
+        "ssl": null,
+        "domain": null
+      }
+    }
+  ],
+  [
+    "inv.perditum.com",
+    {
+      "flag": "🇦🇱",
+      "region": "AL",
+      "stats": {
+        "version": "2.0",
+        "software": {
+          "name": "invidious",
+          "version": "2026.01.01-bc153f75",
+          "branch": "perditum"
+        },
+        "openRegistrations": true,
+        "usage": {
+          "users": {
+            "total": 866,
+            "activeHalfyear": 866,
+            "activeMonth": 351
+          }
+        },
+        "metadata": {
+          "updatedAt": 1767469206,
+          "lastChannelRefreshedAt": 1767469206
+        },
+        "playback": {
+          "totalRequests": 212950,
+          "successfulRequests": 205820,
+          "ratio": 0.97
+        }
+      },
+      "cors": true,
+      "api": true,
+      "type": "https",
+      "uri": "https://inv.perditum.com",
+      "monitor": {
+        "token": "j8nc",
+        "url": "https://inv.perditum.com",
+        "type": "https",
+        "alias": "inv.perditum.com",
+        "uptime": 65.907,
+        "down": false,
+        "down_since": null,
+        "up_since": "2026-01-07T04:57:03Z",
+        "error": null,
+        "period": 300,
+        "string_match": "An alternative front-end to YouTube",
+        "enabled": true,
+        "published": true,
+        "recipients": [],
+        "last_check_at": "2026-01-07T12:41:00Z",
+        "next_check_at": "2026-01-07T12:45:59Z",
+        "created_at": "2025-10-04T19:11:12Z",
+        "mute_until": "forever",
+        "last_status": 200,
+        "apdex_t": 1.0,
+        "disabled_locations": [],
+        "custom_headers": {},
+        "favicon_url": "https://inv.perditum.com/favicon-16x16.png?v=07d49f91",
+        "http_verb": "GET/HEAD",
+        "http_body": "",
+        "ssl": null,
+        "domain": null
+      }
+    }
+  ],
+  [
+    "iv.melmac.space",
+    {
+      "flag": null,
+      "region": null,
+      "stats": {
+        "version": "2.0",
+        "software": {
+          "name": "invidious",
+          "version": "custom",
+          "branch": "custom"
+        }
+      },
+      "cors": true,
+      "api": true,
+      "type": "https",
+      "uri": "https://iv.melmac.space",
+      "monitor": {
+        "token": null,
+        "url": "https://iv.melmac.space",
+        "type": "https",
+        "alias": "iv.melmac.space",
+        "enabled": true,
+        "published": true
+      }
+    }
+  ],
+  [
+    "invidious.materialio.us",
+    {
+      "flag": null,
+      "region": null,
+      "stats": {
+        "version": "2.0",
+        "software": {
+          "name": "invidious",
+          "version": "custom",
+          "branch": "custom"
+        }
+      },
+      "cors": true,
+      "api": true,
+      "type": "https",
+      "uri": "https://invidious.materialio.us",
+      "monitor": {
+        "token": null,
+        "url": "https://invidious.materialio.us",
+        "type": "https",
+        "alias": "invidious.materialio.us",
+        "enabled": true,
+        "published": true
+      }
+    }
+  ],
+  [
+    "y.com.sb",
+    {
+      "flag": null,
+      "region": null,
+      "stats": {
+        "version": "2.0",
+        "software": {
+          "name": "invidious",
+          "version": "custom",
+          "branch": "custom"
+        }
+      },
+      "cors": true,
+      "api": true,
+      "type": "https",
+      "uri": "https://y.com.sb",
+      "monitor": {
+        "token": null,
+        "url": "https://y.com.sb",
+        "type": "https",
+        "alias": "y.com.sb",
+        "enabled": true,
+        "published": true
+      }
+    }
+  ],
+  [
+    "invidious.lunivers.trade",
+    {
+      "flag": null,
+      "region": null,
+      "stats": {
+        "version": "2.0",
+        "software": {
+          "name": "invidious",
+          "version": "custom",
+          "branch": "custom"
+        }
+      },
+      "cors": true,
+      "api": true,
+      "type": "https",
+      "uri": "https://invidious.lunivers.trade",
+      "monitor": {
+        "token": null,
+        "url": "https://invidious.lunivers.trade",
+        "type": "https",
+        "alias": "invidious.lunivers.trade",
+        "enabled": true,
+        "published": true
+      }
+    }
+  ]
+]
