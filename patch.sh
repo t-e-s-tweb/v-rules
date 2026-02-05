@@ -11,4 +11,4 @@ export CGO_CFLAGS="-target armv7a-linux-androideabi21 -O2 -g"' \
 -e '/export CGO_CXXFLAGS=/c\
 export CGO_CXXFLAGS="-O2 -g"' \
 -e '/export CGO_LDFLAGS=/c\
-export CGO_LDFLAGS="-Wl,-z,max-page-size=0x4000 -Wl,-z,common-page-size=0x4000 -Wl,-z,separate-loadable-segments"' libxivpn/build.sh
+export CGO_LDFLAGS="-Wl,-z,max-page-size=0x4000 -Wl,-z,common-page-size=0x4000"' libxivpn/build.sh
