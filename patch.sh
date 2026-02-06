@@ -8,15 +8,15 @@ export GOMAXPROCS=$(nproc)\
 export GOEXPERIMENT="runtimefreegc,sizespecializedmalloc,greenteagc,jsonv2,newinliner,heapminimum512kib"' "$FILE"
 
 # 2. Modify CGO_CFLAGS for each architecture
-sed -i 's|export CGO_CFLAGS="-target aarch64-linux-android21"|export CGO_CFLAGS="-target aarch64-linux-android21 -O2 -g -fPIC"|' "$FILE"
-sed -i 's|export CGO_CFLAGS="-target x86_64-linux-android21"|export CGO_CFLAGS="-target x86_64-linux-android21 -O2 -g -fPIC"|' "$FILE"
-sed -i 's|export CGO_CFLAGS="-target armv7a-linux-androideabi21"|export CGO_CFLAGS="-target armv7a-linux-androideabi21 -O2 -g -fPIC"|' "$FILE"
+sed -i 's|export CGO_CFLAGS="-target aarch64-linux-android21"|export CGO_CFLAGS="-target aarch64-linux-android21 -O3 -flto -fvisibility=hidden -ffunction-sections -fdata-sections -fno-stack-protector -fmerge-all-constants -fomit-frame-pointer -funroll-loops"|' "$FILE"
+sed -i 's|export CGO_CFLAGS="-target x86_64-linux-android21"|export CGO_CFLAGS="-target x86_64-linux-android21 -O3 -flto -fvisibility=hidden -ffunction-sections -fdata-sections -fno-stack-protector -fmerge-all-constants -fomit-frame-pointer -funroll-loops"|' "$FILE"
+sed -i 's|export CGO_CFLAGS="-target armv7a-linux-androideabi21"|export CGO_CFLAGS="-target armv7a-linux-androideabi21 -O3 -flto -fvisibility=hidden -ffunction-sections -fdata-sections -fno-stack-protector -fmerge-all-constants -fomit-frame-pointer -funroll-loops"|' "$FILE"
 
 # 3. Add CGO_CXXFLAGS after CGO_LDFLAGS line
 sed -i '/^export CGO_LDFLAGS=/a\
-export CGO_CXXFLAGS="-O2 -g -fPIC"' "$FILE"
+export CGO_CXXFLAGS="-O3 -flto -fvisibility=hidden -ffunction-sections -fdata-sections -fno-stack-protector -fmerge-all-constants -fomit-frame-pointer -funroll-loops"' "$FILE"
 
 # 4. Update CGO_LDFLAGS
-sed -i 's|export CGO_LDFLAGS="-v -Wl,-z,max-page-size=16384"|export CGO_LDFLAGS="-v -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"|' "$FILE"
+sed -i 's|export CGO_LDFLAGS="-v -Wl,-z,max-page-size=16384"|export CGO_LDFLAGS="-v -Wl,-z,max-page-size=0x4000 -Wl,-z,common-page-size=0x4000 -Wl,-z,separate-loadable-segments -Wl,-z,now -static-libgcc -Wl,--strip-all -Wl,--gc-sections -flto -Wl,-O1 -Wl,--icf=safe"|' "$FILE"
 
 echo "Done patching $FILE"
