@@ -73,9 +73,19 @@ then
     export CC=$NDK/bin/armv7a-linux-androideabi21-clang
     export CXX=$NDK/bin/armv7a-linux-androideabi21-clang++
     export TARGET=armv7a-linux-android
-
+  
     go build -buildmode=pie -trimpath -o libxivpn_armv7a.so -ldflags="-s -w -buildid= -linkmode external" -buildvcs=false
 
     # chmod +x libxivpn_armv7a.so
     # upx --android-shlib libxivpn_armv7a.so
 fi
+
+# Add right before go build:
+echo "=== DEBUG ENV ==="
+echo "CC=$CC"
+echo "CGO_CFLAGS=$CGO_CFLAGS"
+echo "CGO_LDFLAGS=$CGO_LDFLAGS"
+go env CC
+go env CGO_CFLAGS
+go env CGO_LDFLAGS
+echo "=================="
