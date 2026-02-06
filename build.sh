@@ -35,8 +35,8 @@ then
 
     export CGO_CFLAGS="-target aarch64-linux-android21"
     export GOARCH=arm64
-    export CC=$NDK/bin/aarch64-linux-android21-clang
-    export CXX=$NDK/bin/aarch64-linux-android21-clang++
+    export CC=$NDK/bin/aarch64-linux-android24-clang
+    export CXX=$NDK/bin/aarch64-linux-android24-clang++
     export TARGET=aarch64-linux-android
     echo "=== BUILD ENV ==="
     echo "GOOS=$GOOS"
