@@ -14,5 +14,5 @@ if git apply --check /tmp/commit.patch 2>/dev/null; then
     echo "✅ Patch applied successfully!"
 else
     echo "⚠️  Patch has conflicts. Try with --3way:"
-    echo "   git apply --3way /tmp/commit.patch"
+    echo "   git apply --3way -v /tmp/commit.patch"
 fi
