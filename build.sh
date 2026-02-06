@@ -38,6 +38,12 @@ then
     export CC=$NDK/bin/aarch64-linux-android21-clang
     export CXX=$NDK/bin/aarch64-linux-android21-clang++
     export TARGET=aarch64-linux-android
+    echo "=== BUILD ENV ==="
+    echo "GOOS=$GOOS"
+    echo "GOARCH=$GOARCH"
+    echo "CC=$CC"
+    go env GOOS GOARCH CC CGO_CFLAGS
+    echo "=================="
 
     go build -buildmode=pie -trimpath -o libxivpn_arm64.so -ldflags="-s -w -buildid= -linkmode external" -buildvcs=false
 
