@@ -176,7 +176,11 @@ jobs:
           mkdir datalite
           cp ./domains/pktld.txt datalite/pktld
           cp ./v2ray-geosite/data/youtube datalite/youtube
-          cp ./v2ray-geosite/data/private datalite/private
+          cp ./v2ray-geosite/data/private datalite
+          cp ./domains/category-ads-all.txt datalite/category-ads-all
+          cp ./domains/malware.txt datalite/malware
+          cp ./domains/phishing.txt datalite/phishing
+          cp ./domains/cryptominers.txt datalite/cryptominers       
           ./geosite --datapath=datalite --outputdir=./release --outputname=geosite-lite.dat
          
 
