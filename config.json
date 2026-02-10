@@ -330,7 +330,8 @@
           "pk",
           "private",
           "phishing",
-          "malware"
+          "malware",
+          "twitter"
         ]
       }
     },
