@@ -328,7 +328,9 @@
         "outputName": "geoip-lite.dat",
         "wantedList": [
           "pk",
-          "private"
+          "private",
+          "phishing",
+          "malware"
         ]
       }
     },
