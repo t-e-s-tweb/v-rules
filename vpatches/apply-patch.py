@@ -124,7 +124,6 @@ def modify_routing_edit_activity():
     with open(filepath, 'r') as f:
         content = f.read()
 
-    # ---- Guard: skip if already fully patched ----
     if "CUSTOM_OUTBOUND_INDEX = 3" in content and "binding.layoutCustomOutbound.visibility" in content:
         print("  ✓ RoutingEditActivity.kt (already patched)")
         return True
@@ -191,7 +190,6 @@ def modify_routing_edit_activity():
 
         return true
     }'''
-    # Escape and match with flexible whitespace
     pattern = re.escape(old_binding).replace(r'\ ', r'\s+')
     if not re.search(pattern, content, re.DOTALL):
         print("  ✗ Could not find original bindingServer function")
@@ -232,14 +230,11 @@ def modify_routing_edit_activity():
         if not match:
             print("  ✗ Could not find onCreate method")
             return False
-
         method_start = match.start()
-        # Find the opening brace after the signature
         brace_pos = content.find('{', method_start)
         if brace_pos == -1:
             print("  ✗ Could not find opening brace of onCreate")
             return False
-
         # Count braces to find matching closing brace
         count = 1
         pos = brace_pos + 1
@@ -252,16 +247,11 @@ def modify_routing_edit_activity():
         if count != 0:
             print("  ✗ Could not find matching closing brace for onCreate")
             return False
-
-        # Insert listener just before the closing brace
-        insert_pos = pos - 1  # position of the final '}'
-
-        # Indentation: look at the line before the closing brace
+        insert_pos = pos - 1
         line_start = content.rfind('\n', 0, insert_pos) + 1
-        indent = content[line_start:insert_pos]  # spaces before the '}'
+        indent = content[line_start:insert_pos]
         if not indent:
-            indent = '    '  # fallback
-
+            indent = '    '
         listener = f'''
         // Setup listener for outbound tag spinner
         binding.spOutboundTag.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {{
@@ -286,6 +276,7 @@ def modify_v2ray_config_manager():
     with open(filepath, 'r') as f:
         content = f.read()
 
+    # ---- Guard: skip if already fully patched ----
     if "private fun configureCustomOutbound" in content:
         print("  ✓ V2rayConfigManager.kt (already patched)")
         return True
@@ -309,7 +300,7 @@ def modify_v2ray_config_manager():
     content = content.replace(old_line, new_lines, 1)
 
     # ------------------------------------------------------------------
-    # 2. Insert isCustomOutboundTag method
+    # 2. Insert isCustomOutboundTag method – find anchor "return domain\n    }\n\n    /**"
     # ------------------------------------------------------------------
     pattern2 = re.compile(
         r'(\s*return domain\s*\n\s*}\s*\n\s*\n\s*/\*\*)',
@@ -340,21 +331,49 @@ def modify_v2ray_config_manager():
 
     # ------------------------------------------------------------------
     # 3. Insert configureCustomOutbound + setupChainProxyForOutbound
+    #    **BRACE‑MATCHING** – insert after the closing brace of getOutbounds
     # ------------------------------------------------------------------
-    pattern3 = re.compile(
-        r'(\s*updateOutboundFragment\(v2rayConfig\)\s*\n\s*return true\s*\n\s*}\s*\n\s*\n\s*/\*\*)',
-        re.MULTILINE | re.DOTALL
-    )
-    match3 = pattern3.search(content)
-    if not match3:
-        print("  ✗ Failed to insert custom outbound methods – anchor not found")
+    # Find the line that contains 'updateOutboundFragment(v2rayConfig)'
+    fragment_pos = content.find('updateOutboundFragment(v2rayConfig)')
+    if fragment_pos == -1:
+        print("  ✗ Failed to find updateOutboundFragment – anchor not found")
         return False
-    anchor3 = match3.group(1)
-    indent3 = re.match(r'^(\s*)', anchor3).group(1)
-    replacement3 = f'''{indent3}updateOutboundFragment(v2rayConfig)
-        return true
-    }}
 
+    # Find the opening brace of the getOutbounds function
+    # Go backwards to find 'fun getOutbounds('
+    func_start = content.rfind('fun getOutbounds(', 0, fragment_pos)
+    if func_start == -1:
+        print("  ✗ Failed to find getOutbounds function")
+        return False
+
+    # Find the opening brace of the function body
+    brace_pos = content.find('{', func_start)
+    if brace_pos == -1:
+        print("  ✗ Failed to find opening brace of getOutbounds")
+        return False
+
+    # Count braces to find the closing brace
+    count = 1
+    pos = brace_pos + 1
+    while pos < len(content) and count > 0:
+        if content[pos] == '{':
+            count += 1
+        elif content[pos] == '}':
+            count -= 1
+        pos += 1
+    if count != 0:
+        print("  ✗ Failed to find closing brace of getOutbounds")
+        return False
+
+    # Insert after the closing brace (pos-1 is the position of the '}')
+    insert_pos = pos - 1
+    # Get indentation of the line where the closing brace is
+    line_start = content.rfind('\n', 0, insert_pos) + 1
+    indent3 = content[line_start:insert_pos]  # spaces before the '}'
+    if not indent3:
+        indent3 = '    '
+
+    replacement3 = f'''
     /**
      * Configures a custom outbound with chain proxy support.
      * Adds the outbound at the beginning of the list (index 0) so it's defined before routing rules.
@@ -432,8 +451,8 @@ def modify_v2ray_config_manager():
             Log.e(AppConfig.TAG, "❌ Chain proxy failed", e)
         }}
     }}
-'''
-    content = content.replace(anchor3, replacement3, 1)
+{indent3}'''
+    content = content[:insert_pos] + replacement3 + content[insert_pos:]
 
     # ------------------------------------------------------------------
     # 4. Rewrite getRouting – custom outbounds FIRST, THEN routing rules
@@ -471,7 +490,7 @@ def modify_v2ray_config_manager():
 
 def main():
     print("=" * 70)
-    print("Custom Outbound Patcher – Safe Brace Matching")
+    print("Custom Outbound Patcher – Precise Brace Matching")
     print("=" * 70)
     results = []
     for name, func in [
