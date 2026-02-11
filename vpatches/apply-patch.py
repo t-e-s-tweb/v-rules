@@ -60,19 +60,16 @@ def modify_layout():
     with open(filepath, 'r') as f:
         content = f.read()
 
-    # Use a marker approach
     old_marker = 'android:entries="@array/outbound_tag" />'
     if old_marker not in content:
         print("  ✗ Could not find spinner")
         return False
 
-    # Find the closing LinearLayout after spinner
     parts = content.split(old_marker)
     if len(parts) != 2:
         print("  ✗ Could not parse layout")
         return False
 
-    # Find the next </LinearLayout>
     after_spinner = parts[1]
     close_idx = after_spinner.find('</LinearLayout>')
     if close_idx == -1:
@@ -103,7 +100,6 @@ def modify_layout():
             </LinearLayout>'''
 
     new_content = parts[0] + old_marker + after_spinner[:close_idx] + new_layout + after_spinner[close_idx:]
-
     with open(filepath, 'w') as f:
         f.write(new_content)
     print("  ✓ Added custom outbound input layout")
@@ -119,30 +115,26 @@ def modify_routing_edit_activity():
     with open(filepath, 'r') as f:
         content = f.read()
 
-    # 1. Add import
+    # ---- 1. Add import ----
     content = content.replace(
         'import com.v2ray.ang.extension.nullIfBlank',
         '''import com.v2ray.ang.extension.nullIfBlank
 import com.v2ray.ang.extension.isNotNullEmpty'''
     )
 
-    # 2. Add constant
+    # ---- 2. Add constant CUSTOM_OUTBOUND_INDEX ----
     content = content.replace(
-        'private val outbound_tag: Array<out String> by lazy {
-        resources.getStringArray(R.array.outbound_tag)
-    }',
-        'private val outbound_tag: Array<out String> by lazy {
+        'private val outbound_tag: Array<out String> by lazy {\n        resources.getStringArray(R.array.outbound_tag)\n    }',
+        '''private val outbound_tag: Array<out String> by lazy {
         resources.getStringArray(R.array.outbound_tag)
     }
     // Index of "custom" in the outbound_tag array (proxy=0, direct=1, block=2, custom=3)
-    private val CUSTOM_OUTBOUND_INDEX = 3'
+    private val CUSTOM_OUTBOUND_INDEX = 3'''
     )
 
-    # 3. Add spinner listener
+    # ---- 3. Add spinner listener ----
     content = content.replace(
-        'clearServer()
-        }
-    }',
+        'clearServer()\n        }\n    }',
         '''clearServer()
         }
 
@@ -161,11 +153,9 @@ import com.v2ray.ang.extension.isNotNullEmpty'''
     }'''
     )
 
-    # 4. Modify bindingServer
+    # ---- 4. Modify bindingServer ----
     content = content.replace(
-        'binding.spOutboundTag.setSelection(outbound)
-
-        return true',
+        'binding.spOutboundTag.setSelection(outbound)\n\n        return true',
         '''binding.spOutboundTag.setSelection(outbound)
 
         // Set custom outbound tag if present
@@ -180,16 +170,13 @@ import com.v2ray.ang.extension.isNotNullEmpty'''
         return true'''
     )
 
-    # 5. Modify clearServer
+    # ---- 5. Modify clearServer ----
     content = content.replace(
-        'binding.spOutboundTag.setSelection(0)
-        return true',
-        'binding.spOutboundTag.setSelection(0)
-        binding.etCustomOutboundTag.text = null
-        return true'
+        'binding.spOutboundTag.setSelection(0)\n        return true',
+        'binding.spOutboundTag.setSelection(0)\n        binding.etCustomOutboundTag.text = null\n        return true'
     )
 
-    # 6. Modify saveServer
+    # ---- 6. Modify saveServer ----
     content = content.replace(
         'outboundTag = outbound_tag[binding.spOutboundTag.selectedItemPosition]',
         '''// Handle custom outbound tag
@@ -219,7 +206,7 @@ def modify_v2ray_config_manager():
     with open(filepath, 'r') as f:
         content = f.read()
 
-    # 1. Add check in getUserRule2Domain
+    # ---- 1. Add check in getUserRule2Domain ----
     content = content.replace(
         'if (key.enabled && key.outboundTag == tag && !key.domain.isNullOrEmpty()) {',
         '''if (key.enabled && key.outboundTag == tag && !key.domain.isNullOrEmpty()) {
@@ -227,13 +214,9 @@ def modify_v2ray_config_manager():
                 if (isCustomOutboundTag(key.outboundTag)) return@forEach'''
     )
 
-    # 2. Add isCustomOutboundTag method
+    # ---- 2. Add isCustomOutboundTag method ----
     content = content.replace(
-        'return domain
-    }
-
-    /**
-     * Configures custom local DNS settings.',
+        'return domain\n    }\n\n    /**\n     * Configures custom local DNS settings.',
         '''return domain
     }
 
@@ -252,14 +235,9 @@ def modify_v2ray_config_manager():
      * Configures custom local DNS settings.'''
     )
 
-    # 3. Add configureCustomOutbound method
+    # ---- 3. Add configureCustomOutbound method ----
     content = content.replace(
-        'updateOutboundFragment(v2rayConfig)
-        return true
-    }
-
-    /**
-     * Configures additional outbound connections',
+        'updateOutboundFragment(v2rayConfig)\n        return true\n    }\n\n    /**\n     * Configures additional outbound connections',
         '''updateOutboundFragment(v2rayConfig)
         return true
     }
@@ -313,13 +291,9 @@ def modify_v2ray_config_manager():
      * Configures additional outbound connections'''
     )
 
-    # 4. Add setupChainProxyForOutbound method
+    # ---- 4. Add setupChainProxyForOutbound method ----
     content = content.replace(
-        'return true
-    }
-
-    /**
-     * Updates outbound settings based on global preferences.',
+        'return true\n    }\n\n    /**\n     * Updates outbound settings based on global preferences.',
         '''return true
     }
 
@@ -370,11 +344,9 @@ def modify_v2ray_config_manager():
      * Updates outbound settings based on global preferences.'''
     )
 
-    # 5. Modify getRouting
+    # ---- 5. Modify getRouting ----
     content = content.replace(
-        'val rulesetItems = MmkvManager.decodeRoutingRulesets()
-            rulesetItems?.forEach { key ->
-                getRoutingUserRule(key, v2rayConfig)',
+        'val rulesetItems = MmkvManager.decodeRoutingRulesets()\n            rulesetItems?.forEach { key ->\n                getRoutingUserRule(key, v2rayConfig)',
         '''val rulesetItems = MmkvManager.decodeRoutingRulesets()
             val customOutbounds = mutableSetOf<String>()
             rulesetItems?.forEach { key ->
@@ -402,46 +374,28 @@ def main():
     print("=" * 70)
 
     results = []
-
-    try:
-        results.append(("RulesetItem.kt", modify_ruleset_item()))
-    except Exception as e:
-        print(f"  ✗ Error: {e}")
-        results.append(("RulesetItem.kt", False))
-
-    try:
-        results.append(("arrays.xml", modify_arrays_xml()))
-    except Exception as e:
-        print(f"  ✗ Error: {e}")
-        results.append(("arrays.xml", False))
-
-    try:
-        results.append(("activity_routing_edit.xml", modify_layout()))
-    except Exception as e:
-        print(f"  ✗ Error: {e}")
-        results.append(("activity_routing_edit.xml", False))
-
-    try:
-        results.append(("RoutingEditActivity.kt", modify_routing_edit_activity()))
-    except Exception as e:
-        print(f"  ✗ Error: {e}")
-        results.append(("RoutingEditActivity.kt", False))
-
-    try:
-        results.append(("V2rayConfigManager.kt", modify_v2ray_config_manager()))
-    except Exception as e:
-        print(f"  ✗ Error: {e}")
-        results.append(("V2rayConfigManager.kt", False))
+    for func, name in [
+        (modify_ruleset_item, "RulesetItem.kt"),
+        (modify_arrays_xml, "arrays.xml"),
+        (modify_layout, "activity_routing_edit.xml"),
+        (modify_routing_edit_activity, "RoutingEditActivity.kt"),
+        (modify_v2ray_config_manager, "V2rayConfigManager.kt"),
+    ]:
+        try:
+            success = func()
+            results.append((name, success))
+        except Exception as e:
+            print(f"  ✗ Error modifying {name}: {e}")
+            results.append((name, False))
 
     print("\n" + "=" * 70)
     print("Summary:")
-    success_count = sum(1 for _, success in results if success)
+    success_count = sum(1 for _, s in results if s)
     for name, success in results:
         status = "✓" if success else "✗"
         print(f"  {status} {name}")
     print("=" * 70)
     print(f"\nSuccessfully modified {success_count}/{len(results)} files")
-
     if success_count == len(results):
         print("\nAll files modified successfully!")
         print("You can now build the project.")
