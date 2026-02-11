@@ -63,12 +63,12 @@ index 1a86312..1234567 100644
 +                android:layout_marginTop="@dimen/padding_spacing_dp16"
 +                android:orientation="vertical"
 +                android:visibility="gone">
-+
+
 +                <TextView
 +                    android:layout_width="wrap_content"
 +                    android:layout_height="wrap_content"
 +                    android:text="@string/routing_settings_custom_outbound_tag" />
-+
+
 +                <EditText
 +                    android:id="@+id/et_custom_outbound_tag"
 +                    android:layout_width="match_parent"
