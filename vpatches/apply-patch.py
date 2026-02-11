@@ -3,18 +3,12 @@ import os
 import shutil
 from datetime import datetime
 
-def backup_file(filepath):
-    backup_path = f"{filepath}.backup.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    shutil.copy2(filepath, backup_path)
-    print(f"  Backup created: {backup_path}")
-
 def modify_ruleset_item():
     filepath = "V2rayNG/app/src/main/java/com/v2ray/ang/dto/RulesetItem.kt"
     print(f"\nProcessing {filepath}...")
     if not os.path.exists(filepath):
         print(f"  ✗ File not found")
         return False
-    backup_file(filepath)
     with open(filepath, 'r') as f:
         content = f.read()
     old_line = '    var locked: Boolean? = false,'
@@ -35,7 +29,6 @@ def modify_arrays_xml():
     if not os.path.exists(filepath):
         print(f"  ✗ File not found")
         return False
-    backup_file(filepath)
     with open(filepath, 'r') as f:
         content = f.read()
     old_line = '        <item>block</item>'
@@ -56,7 +49,6 @@ def modify_layout():
     if not os.path.exists(filepath):
         print(f"  ✗ File not found")
         return False
-    backup_file(filepath)
     with open(filepath, 'r') as f:
         content = f.read()
 
@@ -111,7 +103,6 @@ def modify_routing_edit_activity():
     if not os.path.exists(filepath):
         print(f"  ✗ File not found")
         return False
-    backup_file(filepath)
     with open(filepath, 'r') as f:
         content = f.read()
 
@@ -202,7 +193,6 @@ def modify_v2ray_config_manager():
     if not os.path.exists(filepath):
         print(f"  ✗ File not found")
         return False
-    backup_file(filepath)
     with open(filepath, 'r') as f:
         content = f.read()
 
