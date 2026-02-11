@@ -39,7 +39,7 @@ if git apply --check "$SCRIPT_DIR/custom-outbound-routing.patch" 2>/dev/null; th
 else
     echo "⚠ Patch may have already been applied or there are conflicts"
     echo "Attempting to apply with --3way..."
-    if git apply --3way "$SCRIPT_DIR/custom-outbound-routing.patch"; then
+    if git apply --3way "$SCRIPT_DIR/custom-outbound-routing.patch" --ignore-whitespace; then
         echo "✓ Main patch applied with 3-way merge"
     else
         echo "✗ Failed to apply main patch"
