@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import os
-import re
 
 def modify_ruleset_item():
     filepath = "V2rayNG/app/src/main/java/com/v2ray/ang/dto/RulesetItem.kt"
@@ -137,14 +136,18 @@ def modify_routing_edit_activity():
 
     # ---- 2. Add constant CUSTOM_OUTBOUND_INDEX ----
     if "CUSTOM_OUTBOUND_INDEX = 3" not in content:
-        pattern = r'(    private val outbound_tag: Array<out String> by lazy {\n        resources\.getStringArray\(R\.array\.outbound_tag\)\n    })'
-        replacement = r'''\1
+        old_const = '''    private val outbound_tag: Array<out String> by lazy {
+        resources.getStringArray(R.array.outbound_tag)
+    }'''
+        new_const = '''    private val outbound_tag: Array<out String> by lazy {
+        resources.getStringArray(R.array.outbound_tag)
+    }
     // Index of "custom" in the outbound_tag array (proxy=0, direct=1, block=2, custom=3)
     private val CUSTOM_OUTBOUND_INDEX = 3'''
-        content, n = re.subn(pattern, replacement, content, flags=re.MULTILINE)
-        if n == 0:
+        if old_const not in content:
             print("  ✗ Could not find outbound_tag declaration")
             return False
+        content = content.replace(old_const, new_const)
 
     # ---- 3. Replace bindingServer ----
     old_binding = '''    private fun bindingServer(rulesetItem: RulesetItem): Boolean {
@@ -190,11 +193,10 @@ def modify_routing_edit_activity():
 
         return true
     }'''
-    pattern = re.escape(old_binding).replace(r'\ ', r'\s+')
-    if not re.search(pattern, content, re.DOTALL):
+    if old_binding not in content:
         print("  ✗ Could not find original bindingServer function")
         return False
-    content = re.sub(pattern, new_binding, content, flags=re.DOTALL)
+    content = content.replace(old_binding, new_binding)
 
     # ---- 4. Modify clearServer ----
     content = content.replace(
@@ -204,9 +206,8 @@ def modify_routing_edit_activity():
 
     # ---- 5. Modify saveServer ----
     if "if (selectedOutboundPosition == CUSTOM_OUTBOUND_INDEX)" not in content:
-        content = content.replace(
-            '            outboundTag = outbound_tag[binding.spOutboundTag.selectedItemPosition]',
-            '''            // Handle custom outbound tag
+        old_save = '            outboundTag = outbound_tag[binding.spOutboundTag.selectedItemPosition]'
+        new_save = '''            // Handle custom outbound tag
             val selectedOutboundPosition = binding.spOutboundTag.selectedItemPosition
             if (selectedOutboundPosition == CUSTOM_OUTBOUND_INDEX) {
                 val customTag = binding.etCustomOutboundTag.text.toString().trim()
@@ -220,49 +221,29 @@ def modify_routing_edit_activity():
                 outboundTag = outbound_tag[selectedOutboundPosition]
                 customOutboundTag = null
             }'''
-        )
+        if old_save not in content:
+            print("  ✗ Could not find saveServer assignment")
+            return False
+        content = content.replace(old_save, new_save)
 
-    # ---- 6. Insert spinner listener INSIDE onCreate using brace matching ----
+    # ---- 6. Insert spinner listener INSIDE onCreate using exact anchor ----
     if "binding.spOutboundTag.onItemSelectedListener" not in content:
-        # Locate the onCreate method
-        method_pattern = re.compile(r'(override\s+fun\s+onCreate\s*\(\s*.*?\s*\)\s*:)', re.DOTALL)
-        match = method_pattern.search(content)
-        if not match:
-            print("  ✗ Could not find onCreate method")
+        # Find the exact end of onCreate: "        }\n    }"
+        old_end = '        }\n    }'
+        if old_end not in content:
+            print("  ✗ Could not find end of onCreate")
             return False
-        method_start = match.start()
-        brace_pos = content.find('{', method_start)
-        if brace_pos == -1:
-            print("  ✗ Could not find opening brace of onCreate")
-            return False
-        # Count braces to find matching closing brace
-        count = 1
-        pos = brace_pos + 1
-        while pos < len(content) and count > 0:
-            if content[pos] == '{':
-                count += 1
-            elif content[pos] == '}':
-                count -= 1
-            pos += 1
-        if count != 0:
-            print("  ✗ Could not find matching closing brace for onCreate")
-            return False
-        insert_pos = pos - 1
-        line_start = content.rfind('\n', 0, insert_pos) + 1
-        indent = content[line_start:insert_pos]
-        if not indent:
-            indent = '    '
-        listener = f'''
+        listener = '''        }
+
         // Setup listener for outbound tag spinner
-        binding.spOutboundTag.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {{
-            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {{
+        binding.spOutboundTag.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
                 binding.layoutCustomOutbound.visibility = if (position == CUSTOM_OUTBOUND_INDEX) android.view.View.VISIBLE else android.view.View.GONE
-            }}
-            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {{}}
-        }}
-{indent}'''
-        content = content[:insert_pos] + listener + content[insert_pos:]
-        print("  ✓ Added spinner listener to onCreate")
+            }
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+    }'''
+        content = content.replace(old_end, listener)
 
     with open(filepath, 'w') as f:
         f.write(content)
@@ -282,38 +263,26 @@ def modify_v2ray_config_manager():
         return True
 
     # ------------------------------------------------------------------
-    # 1. Patch getUserRule2Domain – flexible whitespace
+    # 1. Patch getUserRule2Domain – exact string match (from original file)
     # ------------------------------------------------------------------
-    pattern1 = re.compile(
-        r'^(\s*)if\s*\(\s*key\.enabled\s*&&\s*key\.outboundTag\s*==\s*tag\s*&&\s*!\s*key\.domain\.isNullOrEmpty\(\s*\)\s*\)\s*{',
-        re.MULTILINE
-    )
-    match1 = pattern1.search(content)
-    if not match1:
-        print("  ✗ Failed to patch getUserRule2Domain – pattern not found")
+    old_getUserRule = '        if (key.enabled && key.outboundTag == tag && !key.domain.isNullOrEmpty()) {'
+    new_getUserRule = '''        if (key.enabled && key.outboundTag == tag && !key.domain.isNullOrEmpty()) {
+                // Skip custom outbounds - they should not be treated as standard tags
+                if (isCustomOutboundTag(key.outboundTag)) return@forEach'''
+    if old_getUserRule not in content:
+        print("  ✗ Failed to patch getUserRule2Domain – exact line not found")
         return False
-    indent1 = match1.group(1)
-    old_line = match1.group(0)
-    new_lines = f'''{indent1}if (key.enabled && key.outboundTag == tag && !key.domain.isNullOrEmpty()) {{
-{indent1}    // Skip custom outbounds - they should not be treated as standard tags
-{indent1}    if (isCustomOutboundTag(key.outboundTag)) return@forEach'''
-    content = content.replace(old_line, new_lines, 1)
+    content = content.replace(old_getUserRule, new_getUserRule, 1)
 
     # ------------------------------------------------------------------
-    # 2. Insert isCustomOutboundTag method – find anchor "return domain\n    }\n\n    /**"
+    # 2. Insert isCustomOutboundTag – exact anchor (from original file)
     # ------------------------------------------------------------------
-    pattern2 = re.compile(
-        r'(\s*return domain\s*\n\s*}\s*\n\s*\n\s*/\*\*)',
-        re.MULTILINE
-    )
-    match2 = pattern2.search(content)
-    if not match2:
-        print("  ✗ Failed to insert isCustomOutboundTag – anchor not found")
-        return False
-    anchor2 = match2.group(1)
-    indent2 = re.match(r'^(\s*)', anchor2).group(1)
-    replacement2 = f'''{indent2}return domain
-    }}
+    old_anchor = '''        return domain
+    }
+
+    /**'''
+    new_anchor = '''        return domain
+    }
 
     /**
      * Checks if an outbound tag is a custom (user-defined) outbound.
@@ -322,58 +291,32 @@ def modify_v2ray_config_manager():
      * @param tag The outbound tag to check
      * @return true if the tag is custom, false otherwise
      */
-    private fun isCustomOutboundTag(tag: String): Boolean {{
+    private fun isCustomOutboundTag(tag: String): Boolean {
         return tag != AppConfig.TAG_PROXY && tag != AppConfig.TAG_DIRECT && tag != AppConfig.TAG_BLOCKED
-    }}
+    }
 
     /**'''
-    content = content.replace(anchor2, replacement2, 1)
+    if old_anchor not in content:
+        print("  ✗ Failed to insert isCustomOutboundTag – anchor not found")
+        return False
+    content = content.replace(old_anchor, new_anchor, 1)
 
     # ------------------------------------------------------------------
     # 3. Insert configureCustomOutbound + setupChainProxyForOutbound
-    #    **BRACE‑MATCHING** – insert after the closing brace of getOutbounds
+    #    Insert BEFORE the line 'private fun getMoreOutbounds('
     # ------------------------------------------------------------------
-    # Find the line that contains 'updateOutboundFragment(v2rayConfig)'
-    fragment_pos = content.find('updateOutboundFragment(v2rayConfig)')
-    if fragment_pos == -1:
-        print("  ✗ Failed to find updateOutboundFragment – anchor not found")
+    insert_before = '    private fun getMoreOutbounds('
+    if insert_before not in content:
+        print("  ✗ Failed to find getMoreOutbounds anchor")
         return False
 
-    # Find the opening brace of the getOutbounds function
-    # Go backwards to find 'fun getOutbounds('
-    func_start = content.rfind('fun getOutbounds(', 0, fragment_pos)
-    if func_start == -1:
-        print("  ✗ Failed to find getOutbounds function")
-        return False
-
-    # Find the opening brace of the function body
-    brace_pos = content.find('{', func_start)
-    if brace_pos == -1:
-        print("  ✗ Failed to find opening brace of getOutbounds")
-        return False
-
-    # Count braces to find the closing brace
-    count = 1
-    pos = brace_pos + 1
-    while pos < len(content) and count > 0:
-        if content[pos] == '{':
-            count += 1
-        elif content[pos] == '}':
-            count -= 1
-        pos += 1
-    if count != 0:
-        print("  ✗ Failed to find closing brace of getOutbounds")
-        return False
-
-    # Insert after the closing brace (pos-1 is the position of the '}')
-    insert_pos = pos - 1
-    # Get indentation of the line where the closing brace is
-    line_start = content.rfind('\n', 0, insert_pos) + 1
-    indent3 = content[line_start:insert_pos]  # spaces before the '}'
-    if not indent3:
-        indent3 = '    '
-
-    replacement3 = f'''
+    # Get the indentation of the anchor line
+    lines = content.split('\n')
+    for i, line in enumerate(lines):
+        if line.strip().startswith('private fun getMoreOutbounds('):
+            indent = line[:len(line) - len(line.lstrip())]
+            # Insert new methods at this line, preserving indentation
+            new_methods = f'''
     /**
      * Configures a custom outbound with chain proxy support.
      * Adds the outbound at the beginning of the list (index 0) so it's defined before routing rules.
@@ -451,37 +394,38 @@ def modify_v2ray_config_manager():
             Log.e(AppConfig.TAG, "❌ Chain proxy failed", e)
         }}
     }}
-{indent3}'''
-    content = content[:insert_pos] + replacement3 + content[insert_pos:]
+'''
+            lines.insert(i, new_methods)
+            content = '\n'.join(lines)
+            print("  ✓ Inserted custom outbound methods before getMoreOutbounds")
+            break
+    else:
+        print("  ✗ Failed to insert custom outbound methods – anchor line not found")
+        return False
 
     # ------------------------------------------------------------------
-    # 4. Rewrite getRouting – custom outbounds FIRST, THEN routing rules
+    # 4. Patch getRouting – exact string match (from original file)
     # ------------------------------------------------------------------
-    pattern4 = re.compile(
-        r'(\s*val\s+rulesetItems\s*=\s*MmkvManager\.decodeRoutingRulesets\(\)\s*\n\s*rulesetItems\?\.forEach\s*\{\s*key\s*->\s*\n\s*getRoutingUserRule\(key,\s*v2rayConfig\))',
-        re.MULTILINE
-    )
-    match4 = pattern4.search(content)
-    if not match4:
-        print("  ✗ Failed to patch getRouting – anchor not found")
-        return False
-    anchor4 = match4.group(1)
-    indent4 = re.match(r'^(\s*)', anchor4).group(1)
-    replacement4 = f'''{indent4}val rulesetItems = MmkvManager.decodeRoutingRulesets()
+    old_getRouting = '''            val rulesetItems = MmkvManager.decodeRoutingRulesets()
+            rulesetItems?.forEach { key ->
+                getRoutingUserRule(key, v2rayConfig)'''
+    new_getRouting = '''            val rulesetItems = MmkvManager.decodeRoutingRulesets()
             val customOutbounds = mutableSetOf<String>()
-            rulesetItems?.forEach {{ key ->
-                if (key.enabled && isCustomOutboundTag(key.outboundTag)) {{
+            rulesetItems?.forEach { key ->
+                if (key.enabled && isCustomOutboundTag(key.outboundTag)) {
                     customOutbounds.add(key.outboundTag)
-                }}
-            }}
+                }
+            }
             Log.i(AppConfig.TAG, "🎯 Custom outbound tags: $customOutbounds")
             // Configure custom outbounds BEFORE adding routing rules that reference them
-            customOutbounds.forEach {{ configureCustomOutbound(v2rayConfig, it) }}
+            customOutbounds.forEach { configureCustomOutbound(v2rayConfig, it) }
             // Now add all routing rules
-            rulesetItems?.forEach {{ key ->
-                getRoutingUserRule(key, v2rayConfig)
-            }}'''
-    content = content.replace(anchor4, replacement4, 1)
+            rulesetItems?.forEach { key ->
+                getRoutingUserRule(key, v2rayConfig)'''
+    if old_getRouting not in content:
+        print("  ✗ Failed to patch getRouting – exact block not found")
+        return False
+    content = content.replace(old_getRouting, new_getRouting, 1)
 
     with open(filepath, 'w') as f:
         f.write(content)
@@ -490,7 +434,7 @@ def modify_v2ray_config_manager():
 
 def main():
     print("=" * 70)
-    print("Custom Outbound Patcher – Precise Brace Matching")
+    print("Custom Outbound Patcher – Exact String Replacements")
     print("=" * 70)
     results = []
     for name, func in [
@@ -522,4 +466,5 @@ def main():
         print("\n❌ Some patches failed – check the error messages above.")
 
 if __name__ == "__main__":
+    import re  # only used in layout and strings
     main()
