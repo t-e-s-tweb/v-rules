@@ -95,6 +95,47 @@ def modify_layout():
     print("  ✓ Added custom outbound input layout")
     return True
 
+def modify_strings_xml():
+    filepath = "V2rayNG/app/src/main/res/values/strings.xml"
+    print(f"\nProcessing {filepath}...")
+    if not os.path.exists(filepath):
+        print(f"  ✗ File not found – cannot add required string resources.")
+        return False
+
+    with open(filepath, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    # Check if resources already exist
+    if 'name="routing_settings_custom_outbound_tag"' in content:
+        print("  ✓ String 'routing_settings_custom_outbound_tag' already present")
+    if 'name="routing_settings_custom_outbound_hint"' in content:
+        print("  ✓ String 'routing_settings_custom_outbound_hint' already present")
+    if 'name="routing_settings_custom_outbound_tag"' in content and 'name="routing_settings_custom_outbound_hint"' in content:
+        return True
+
+    # Find the closing </resources> tag
+    close_tag_pattern = r'(\s*)</resources>'
+    match = re.search(close_tag_pattern, content, re.IGNORECASE)
+    if not match:
+        print("  ✗ Could not find </resources> tag")
+        return False
+
+    # Use 4 spaces indentation to match existing resources
+    indent = "    "
+    insertion_point = match.start()
+
+    # Build the new string resources block
+    new_strings = f'''
+{indent}<string name="routing_settings_custom_outbound_tag">Custom outbound tag</string>
+{indent}<string name="routing_settings_custom_outbound_hint">Enter profile/group remark</string>
+'''
+
+    new_content = content[:insertion_point] + new_strings + content[insertion_point:]
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(new_content)
+    print("  ✓ Added required string resources")
+    return True
+
 def modify_routing_edit_activity():
     filepath = "V2rayNG/app/src/main/java/com/v2ray/ang/ui/RoutingEditActivity.kt"
     print(f"\nProcessing {filepath}...")
@@ -112,7 +153,6 @@ import com.v2ray.ang.extension.isNotNullEmpty'''
     )
 
     # ---- 2. Add constant CUSTOM_OUTBOUND_INDEX ----
-    # Original: 4 spaces before "private", 8 spaces inside lazy block
     content = content.replace(
         '    private val outbound_tag: Array<out String> by lazy {\n        resources.getStringArray(R.array.outbound_tag)\n    }',
         '''    private val outbound_tag: Array<out String> by lazy {
@@ -123,7 +163,6 @@ import com.v2ray.ang.extension.isNotNullEmpty'''
     )
 
     # ---- 3. Add spinner listener inside onCreate ----
-    # Replace the two closing braces: one at 8 spaces, one at 4 spaces
     listener_block = '''        }
 
         // Setup listener for outbound tag spinner
@@ -165,7 +204,6 @@ import com.v2ray.ang.extension.isNotNullEmpty'''
     )
 
     # ---- 6. Modify saveServer ----
-    # Original line is indented with 12 spaces
     content = content.replace(
         '            outboundTag = outbound_tag[binding.spOutboundTag.selectedItemPosition]',
         '''            // Handle custom outbound tag
@@ -195,7 +233,6 @@ def modify_v2ray_config_manager():
         content = f.read()
 
     # ---- 1. Add check in getUserRule2Domain ----
-    # Original line is indented with 8 spaces
     content = content.replace(
         '        if (key.enabled && key.outboundTag == tag && !key.domain.isNullOrEmpty()) {',
         '''        if (key.enabled && key.outboundTag == tag && !key.domain.isNullOrEmpty()) {
@@ -204,7 +241,6 @@ def modify_v2ray_config_manager():
     )
 
     # ---- 2. Add isCustomOutboundTag method ----
-    # Original block: 8 spaces before 'return domain', 4 spaces before '}', 4 spaces before '/**'
     content = content.replace(
         '        return domain\n    }\n\n    /**',
         '''        return domain
@@ -225,8 +261,6 @@ def modify_v2ray_config_manager():
     )
 
     # ---- 3. Add configureCustomOutbound method ----
-    # Original block: 8 spaces before 'updateOutboundFragment', 8 spaces before 'return true',
-    # 4 spaces before '}', 4 spaces before '/**'
     content = content.replace(
         '        updateOutboundFragment(v2rayConfig)\n        return true\n    }\n\n    /**',
         '''        updateOutboundFragment(v2rayConfig)
@@ -282,7 +316,6 @@ def modify_v2ray_config_manager():
     )
 
     # ---- 4. Add setupChainProxyForOutbound method ----
-    # Original block: 8 spaces before 'return true', 4 spaces before '}', 4 spaces before '/**'
     content = content.replace(
         '        return true\n    }\n\n    /**',
         '''        return true
@@ -335,8 +368,6 @@ def modify_v2ray_config_manager():
     )
 
     # ---- 5. Modify getRouting ----
-    # Original lines: 12 spaces before 'val', 12 spaces before 'rulesetItems?.forEach',
-    # 16 spaces before 'getRoutingUserRule'
     content = content.replace(
         '            val rulesetItems = MmkvManager.decodeRoutingRulesets()\n            rulesetItems?.forEach { key ->\n                getRoutingUserRule(key, v2rayConfig)',
         '''            val rulesetItems = MmkvManager.decodeRoutingRulesets()
@@ -364,12 +395,14 @@ def main():
     print("=" * 70)
     print("Custom Outbound Support - Direct File Modification")
     print("=" * 70)
+    print("\n⚠️  This script modifies files directly – no backups are created.")
 
     results = []
     for func, name in [
         (modify_ruleset_item, "RulesetItem.kt"),
         (modify_arrays_xml, "arrays.xml"),
         (modify_layout, "activity_routing_edit.xml"),
+        (modify_strings_xml, "strings.xml"),          # added!
         (modify_routing_edit_activity, "RoutingEditActivity.kt"),
         (modify_v2ray_config_manager, "V2rayConfigManager.kt"),
     ]:
@@ -390,16 +423,11 @@ def main():
     print(f"\nSuccessfully modified {success_count}/{len(results)} files")
     if success_count == len(results):
         print("\n✅ All files modified successfully!")
-        print("\n⚠️  IMPORTANT: You must add the following string resources")
-        print("   to `V2rayNG/app/src/main/res/values/strings.xml`:")
-        print()
-        print('    <string name="routing_settings_custom_outbound_tag">Custom outbound tag</string>')
-        print('    <string name="routing_settings_custom_outbound_hint">Enter profile/group remark</string>')
-        print()
-        print("Then rebuild the project.")
+        print("   The two required string resources have been inserted into strings.xml.")
+        print("\nYou can now rebuild the project – no manual steps remain.")
     else:
         print("\n❌ Some files failed to modify.")
-        print("Check the error messages above and manually apply the changes.")
+        print("   Check the error messages above and manually apply the changes.")
 
 if __name__ == "__main__":
     main()
