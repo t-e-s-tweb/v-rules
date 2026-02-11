@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import os
-import shutil
-from datetime import datetime
+import re
 
 def modify_ruleset_item():
     filepath = "V2rayNG/app/src/main/java/com/v2ray/ang/dto/RulesetItem.kt"
@@ -52,46 +51,45 @@ def modify_layout():
     with open(filepath, 'r') as f:
         content = f.read()
 
-    old_marker = 'android:entries="@array/outbound_tag" />'
-    if old_marker not in content:
+    spinner_pattern = r'android:entries="@array/outbound_tag" />'
+    match = re.search(spinner_pattern, content)
+    if not match:
         print("  ✗ Could not find spinner")
         return False
 
-    parts = content.split(old_marker)
-    if len(parts) != 2:
-        print("  ✗ Could not parse layout")
+    after_spinner = content[match.end():]
+    close_match = re.search(r'(\s*)</LinearLayout>', after_spinner)
+    if not close_match:
+        print("  ✗ Could not find parent LinearLayout closing tag")
         return False
 
-    after_spinner = parts[1]
-    close_idx = after_spinner.find('</LinearLayout>')
-    if close_idx == -1:
-        print("  ✗ Could not find closing tag")
-        return False
+    indent = close_match.group(1)
+    close_tag_start = match.end() + close_match.start()
+    close_tag_end = close_tag_start + len(close_match.group(0))
 
-    new_layout = '''            </LinearLayout>
+    new_layout = f'''{indent}
+{indent}<LinearLayout
+{indent}    android:id="@+id/layout_custom_outbound"
+{indent}    android:layout_width="match_parent"
+{indent}    android:layout_height="wrap_content"
+{indent}    android:layout_marginTop="@dimen/padding_spacing_dp16"
+{indent}    android:orientation="vertical"
+{indent}    android:visibility="gone">
 
-            <LinearLayout
-                android:id="@+id/layout_custom_outbound"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="@dimen/padding_spacing_dp16"
-                android:orientation="vertical"
-                android:visibility="gone">
+{indent}    <TextView
+{indent}        android:layout_width="wrap_content"
+{indent}        android:layout_height="wrap_content"
+{indent}        android:text="@string/routing_settings_custom_outbound_tag" />
 
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/routing_settings_custom_outbound_tag" />
+{indent}    <EditText
+{indent}        android:id="@+id/et_custom_outbound_tag"
+{indent}        android:layout_width="match_parent"
+{indent}        android:layout_height="wrap_content"
+{indent}        android:inputType="text"
+{indent}        android:hint="@string/routing_settings_custom_outbound_hint" />
+{indent}</LinearLayout>'''
 
-                <EditText
-                    android:id="@+id/et_custom_outbound_tag"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:inputType="text"
-                    android:hint="@string/routing_settings_custom_outbound_hint" />
-            </LinearLayout>'''
-
-    new_content = parts[0] + old_marker + after_spinner[:close_idx] + new_layout + after_spinner[close_idx:]
+    new_content = content[:close_tag_end] + new_layout + content[close_tag_end:]
     with open(filepath, 'w') as f:
         f.write(new_content)
     print("  ✓ Added custom outbound input layout")
@@ -114,20 +112,19 @@ import com.v2ray.ang.extension.isNotNullEmpty'''
     )
 
     # ---- 2. Add constant CUSTOM_OUTBOUND_INDEX ----
+    # Original: 4 spaces before "private", 8 spaces inside lazy block
     content = content.replace(
-        'private val outbound_tag: Array<out String> by lazy {\n        resources.getStringArray(R.array.outbound_tag)\n    }',
-        '''private val outbound_tag: Array<out String> by lazy {
+        '    private val outbound_tag: Array<out String> by lazy {\n        resources.getStringArray(R.array.outbound_tag)\n    }',
+        '''    private val outbound_tag: Array<out String> by lazy {
         resources.getStringArray(R.array.outbound_tag)
     }
     // Index of "custom" in the outbound_tag array (proxy=0, direct=1, block=2, custom=3)
     private val CUSTOM_OUTBOUND_INDEX = 3'''
     )
 
-    # ---- 3. Add spinner listener ----
-    content = content.replace(
-        'clearServer()\n        }\n    }',
-        '''clearServer()
-        }
+    # ---- 3. Add spinner listener inside onCreate ----
+    # Replace the two closing braces: one at 8 spaces, one at 4 spaces
+    listener_block = '''        }
 
         // Setup listener for outbound tag spinner
         binding.spOutboundTag.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
@@ -142,12 +139,12 @@ import com.v2ray.ang.extension.isNotNullEmpty'''
             }
         }
     }'''
-    )
+    content = content.replace('        }\n    }', listener_block)
 
     # ---- 4. Modify bindingServer ----
     content = content.replace(
-        'binding.spOutboundTag.setSelection(outbound)\n\n        return true',
-        '''binding.spOutboundTag.setSelection(outbound)
+        '        binding.spOutboundTag.setSelection(outbound)\n\n        return true',
+        '''        binding.spOutboundTag.setSelection(outbound)
 
         // Set custom outbound tag if present
         if (rulesetItem.customOutboundTag.isNotNullEmpty()) {
@@ -163,14 +160,15 @@ import com.v2ray.ang.extension.isNotNullEmpty'''
 
     # ---- 5. Modify clearServer ----
     content = content.replace(
-        'binding.spOutboundTag.setSelection(0)\n        return true',
-        'binding.spOutboundTag.setSelection(0)\n        binding.etCustomOutboundTag.text = null\n        return true'
+        '        binding.spOutboundTag.setSelection(0)\n        return true',
+        '        binding.spOutboundTag.setSelection(0)\n        binding.etCustomOutboundTag.text = null\n        return true'
     )
 
     # ---- 6. Modify saveServer ----
+    # Original line is indented with 12 spaces
     content = content.replace(
-        'outboundTag = outbound_tag[binding.spOutboundTag.selectedItemPosition]',
-        '''// Handle custom outbound tag
+        '            outboundTag = outbound_tag[binding.spOutboundTag.selectedItemPosition]',
+        '''            // Handle custom outbound tag
             val selectedOutboundPosition = binding.spOutboundTag.selectedItemPosition
             if (selectedOutboundPosition == CUSTOM_OUTBOUND_INDEX) {
                 // Custom selected - use the custom outbound tag value
@@ -197,17 +195,19 @@ def modify_v2ray_config_manager():
         content = f.read()
 
     # ---- 1. Add check in getUserRule2Domain ----
+    # Original line is indented with 8 spaces
     content = content.replace(
-        'if (key.enabled && key.outboundTag == tag && !key.domain.isNullOrEmpty()) {',
-        '''if (key.enabled && key.outboundTag == tag && !key.domain.isNullOrEmpty()) {
+        '        if (key.enabled && key.outboundTag == tag && !key.domain.isNullOrEmpty()) {',
+        '''        if (key.enabled && key.outboundTag == tag && !key.domain.isNullOrEmpty()) {
                 // Skip custom outbounds - they should not be treated as standard tags
                 if (isCustomOutboundTag(key.outboundTag)) return@forEach'''
     )
 
     # ---- 2. Add isCustomOutboundTag method ----
+    # Original block: 8 spaces before 'return domain', 4 spaces before '}', 4 spaces before '/**'
     content = content.replace(
-        'return domain\n    }\n\n    /**\n     * Configures custom local DNS settings.',
-        '''return domain
+        '        return domain\n    }\n\n    /**',
+        '''        return domain
     }
 
     /**
@@ -221,14 +221,15 @@ def modify_v2ray_config_manager():
         return tag != AppConfig.TAG_PROXY && tag != AppConfig.TAG_DIRECT && tag != AppConfig.TAG_BLOCKED
     }
 
-    /**
-     * Configures custom local DNS settings.'''
+    /**'''
     )
 
     # ---- 3. Add configureCustomOutbound method ----
+    # Original block: 8 spaces before 'updateOutboundFragment', 8 spaces before 'return true',
+    # 4 spaces before '}', 4 spaces before '/**'
     content = content.replace(
-        'updateOutboundFragment(v2rayConfig)\n        return true\n    }\n\n    /**\n     * Configures additional outbound connections',
-        '''updateOutboundFragment(v2rayConfig)
+        '        updateOutboundFragment(v2rayConfig)\n        return true\n    }\n\n    /**',
+        '''        updateOutboundFragment(v2rayConfig)
         return true
     }
 
@@ -277,14 +278,14 @@ def modify_v2ray_config_manager():
         }
     }
 
-    /**
-     * Configures additional outbound connections'''
+    /**'''
     )
 
     # ---- 4. Add setupChainProxyForOutbound method ----
+    # Original block: 8 spaces before 'return true', 4 spaces before '}', 4 spaces before '/**'
     content = content.replace(
-        'return true\n    }\n\n    /**\n     * Updates outbound settings based on global preferences.',
-        '''return true
+        '        return true\n    }\n\n    /**',
+        '''        return true
     }
 
     /**
@@ -330,14 +331,15 @@ def modify_v2ray_config_manager():
         }
     }
 
-    /**
-     * Updates outbound settings based on global preferences.'''
+    /**'''
     )
 
     # ---- 5. Modify getRouting ----
+    # Original lines: 12 spaces before 'val', 12 spaces before 'rulesetItems?.forEach',
+    # 16 spaces before 'getRoutingUserRule'
     content = content.replace(
-        'val rulesetItems = MmkvManager.decodeRoutingRulesets()\n            rulesetItems?.forEach { key ->\n                getRoutingUserRule(key, v2rayConfig)',
-        '''val rulesetItems = MmkvManager.decodeRoutingRulesets()
+        '            val rulesetItems = MmkvManager.decodeRoutingRulesets()\n            rulesetItems?.forEach { key ->\n                getRoutingUserRule(key, v2rayConfig)',
+        '''            val rulesetItems = MmkvManager.decodeRoutingRulesets()
             val customOutbounds = mutableSetOf<String>()
             rulesetItems?.forEach { key ->
                 // Track custom outbounds for later setup
@@ -387,12 +389,17 @@ def main():
     print("=" * 70)
     print(f"\nSuccessfully modified {success_count}/{len(results)} files")
     if success_count == len(results):
-        print("\nAll files modified successfully!")
-        print("You can now build the project.")
+        print("\n✅ All files modified successfully!")
+        print("\n⚠️  IMPORTANT: You must add the following string resources")
+        print("   to `V2rayNG/app/src/main/res/values/strings.xml`:")
+        print()
+        print('    <string name="routing_settings_custom_outbound_tag">Custom outbound tag</string>')
+        print('    <string name="routing_settings_custom_outbound_hint">Enter profile/group remark</string>')
+        print()
+        print("Then rebuild the project.")
     else:
-        print("\nSome files failed to modify.")
+        print("\n❌ Some files failed to modify.")
         print("Check the error messages above and manually apply the changes.")
-        print("\nBackup files were created with .backup.<timestamp> extension.")
 
 if __name__ == "__main__":
     main()
