@@ -2,17 +2,6 @@ From: Assistant <assistant@example.com>
 Date: Wed, 11 Feb 2026 00:00:00 +0000
 Subject: [PATCH] Add custom outbound support in routing settings
 
-This patch adds the ability to set custom outbound tags in routing settings.
-Previously, only 'proxy', 'direct', and 'block' were supported.
-Now users can specify a custom outbound name which will be included in
-the generated V2Ray config.
-
-Features:
-- Added 'custom' option to outbound tag spinner in routing rules
-- Added EditText for entering custom outbound tag name
-- Custom outbounds are properly included in generated V2Ray config
-- Chain proxy (prev/next) settings are respected for custom group outbounds
-
 ---
  V2rayNG/app/src/main/java/com/v2ray/ang/dto/RulesetItem.kt    |   1 +
  V2rayNG/app/src/main/java/com/v2ray/ang/handler/V2rayConfigManager.kt       | 120 ++++++++++++++++--
@@ -22,7 +11,7 @@ Features:
  5 files changed, 169 insertions(+), 15 deletions(-)
 
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/dto/RulesetItem.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/RulesetItem.kt
-index a0e73a9..1234567 100644
+index a0e73a9..b0e73a9 100644
 --- a/V2rayNG/app/src/main/java/com/v2ray/ang/dto/RulesetItem.kt
 +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/RulesetItem.kt
 @@ -9,4 +9,5 @@ data class RulesetItem(
@@ -36,7 +25,7 @@ index a0e73a9..1234567 100644
 \ No newline at end of file
 
 diff --git a/V2rayNG/app/src/main/res/values/arrays.xml b/V2rayNG/app/src/main/res/values/arrays.xml
-index 2fd57ba..1234567 100644
+index 2fd57ba..3fd57ba 100644
 --- a/V2rayNG/app/src/main/res/values/arrays.xml
 +++ b/V2rayNG/app/src/main/res/values/arrays.xml
 @@ -143,6 +143,7 @@
@@ -49,7 +38,7 @@ index 2fd57ba..1234567 100644
     <string-array name="xhttp_mode" translatable="false">
 
 diff --git a/V2rayNG/app/src/main/res/layout/activity_routing_edit.xml b/V2rayNG/app/src/main/res/layout/activity_routing_edit.xml
-index 1a86312..1234567 100644
+index 1a86312..2a86312 100644
 --- a/V2rayNG/app/src/main/res/layout/activity_routing_edit.xml
 +++ b/V2rayNG/app/src/main/res/layout/activity_routing_edit.xml
 @@ -100,6 +100,26 @@
@@ -81,7 +70,7 @@ index 1a86312..1234567 100644
                 android:layout_height="wrap_content"
 
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/RoutingEditActivity.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/RoutingEditActivity.kt
-index 2435708..1234567 100644
+index 2435708..3435708 100644
 --- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/RoutingEditActivity.kt
 +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/RoutingEditActivity.kt
 @@ -9,6 +9,7 @@ import com.v2ray.ang.R
@@ -167,7 +156,7 @@ index 2435708..1234567 100644
          rulesetItem.port = binding.etPort.text.toString().nullIfBlank()
 
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/handler/V2rayConfigManager.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/handler/V2rayConfigManager.kt
-index 8eca5fe..1234567 100644
+index 8eca5fe..9eca5fe 100644
 --- a/V2rayNG/app/src/main/java/com/v2ray/ang/handler/V2rayConfigManager.kt
 +++ b/V2rayNG/app/src/main/java/com/v2ray/ang/handler/V2rayConfigManager.kt
 @@ -550,6 +550,9 @@ object V2rayConfigManager {
