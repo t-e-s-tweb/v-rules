@@ -105,28 +105,35 @@ def modify_strings_xml():
     with open(filepath, 'r', encoding='utf-8') as f:
         content = f.read()
 
-    if 'name="routing_settings_custom_outbound_tag"' in content and \
-       'name="routing_settings_custom_outbound_hint"' in content:
-        print("  ✓ String resources already present")
-        return True
+    # Add all required string resources (idempotent)
+    required_strings = {
+        "routing_settings_custom_outbound_tag": "Custom outbound tag",
+        "routing_settings_custom_outbound_hint": "Enter profile/group remark",
+        "routing_settings_custom_outbound_empty": "Custom outbound tag cannot be empty"
+    }
 
-    close_tag_pattern = r'(\s*)</resources>'
-    match = re.search(close_tag_pattern, content, re.IGNORECASE)
-    if not match:
-        print("  ✗ Could not find </resources> tag")
-        return False
+    any_added = False
+    for name, value in required_strings.items():
+        if f'name="{name}"' in content:
+            print(f"  ✓ String '{name}' already present")
+        else:
+            # Insert before </resources>
+            close_tag_pattern = r'(\s*)</resources>'
+            match = re.search(close_tag_pattern, content, re.IGNORECASE)
+            if not match:
+                print(f"  ✗ Could not find </resources> tag to insert '{name}'")
+                return False
+            indent = match.group(1)
+            insertion_point = match.start()
+            new_string = f'\n{indent}<string name="{name}">{value}</string>'
+            content = content[:insertion_point] + new_string + content[insertion_point:]
+            any_added = True
+            print(f"  ✓ Added string '{name}'")
 
-    indent = "    "
-    insertion_point = match.start()
-    new_strings = f'''
-{indent}<string name="routing_settings_custom_outbound_tag">Custom outbound tag</string>
-{indent}<string name="routing_settings_custom_outbound_hint">Enter profile/group remark</string>
-'''
+    if any_added:
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(content)
 
-    new_content = content[:insertion_point] + new_strings + content[insertion_point:]
-    with open(filepath, 'w', encoding='utf-8') as f:
-        f.write(new_content)
-    print("  ✓ Added required string resources")
     return True
 
 def modify_routing_edit_activity():
@@ -196,15 +203,21 @@ import com.v2ray.ang.extension.isNotNullEmpty'''
         '        binding.spOutboundTag.setSelection(0)\n        binding.etCustomOutboundTag.text = null\n        return true'
     )
 
-    # ---- 6. Modify saveServer ----
+    # ---- 6. Modify saveServer with validation ----
+    # Replace the old outboundTag assignment with the full block that includes empty check
     content = content.replace(
         '            outboundTag = outbound_tag[binding.spOutboundTag.selectedItemPosition]',
         '''            // Handle custom outbound tag
             val selectedOutboundPosition = binding.spOutboundTag.selectedItemPosition
             if (selectedOutboundPosition == CUSTOM_OUTBOUND_INDEX) {
-                // Custom selected - use the custom outbound tag value
-                outboundTag = binding.etCustomOutboundTag.text.toString().trim()
-                customOutboundTag = outboundTag
+                // Custom selected - validate and use the custom outbound tag value
+                val customTag = binding.etCustomOutboundTag.text.toString().trim()
+                if (customTag.isEmpty()) {
+                    toast(R.string.routing_settings_custom_outbound_empty)
+                    return false
+                }
+                outboundTag = customTag
+                customOutboundTag = customTag
             } else {
                 outboundTag = outbound_tag[selectedOutboundPosition]
                 customOutboundTag = null
@@ -245,7 +258,6 @@ def modify_v2ray_config_manager():
 
     # ------------------------------------------------------------------
     # 2. Insert isCustomOutboundTag after getUserRule2Domain
-    #    Anchor: the line "        return domain" + the closing brace + blank line + "/**"
     # ------------------------------------------------------------------
     pattern2 = r'(        return domain\n    }\n\n    /\*\*)'
     is_custom_method = r'''\1
@@ -269,7 +281,7 @@ def modify_v2ray_config_manager():
 
     # ------------------------------------------------------------------
     # 3. Insert configureCustomOutbound + setupChainProxyForOutbound
-    #    Anchor: the end of getOutbounds (updateOutboundFragment + return true + closing brace + blank line + "/**")
+    #    (with detailed logging to help diagnose missing outbounds)
     # ------------------------------------------------------------------
     pattern3 = r'(        updateOutboundFragment\(v2rayConfig\)\n        return true\n    }\n\n    /\*\*)'
     custom_methods_block = r'''\1
@@ -279,25 +291,38 @@ def modify_v2ray_config_manager():
      * This is used when a routing rule specifies a custom outbound tag.
      *
      * @param v2rayConfig The V2ray configuration object to be modified
-     * @param customOutboundTag The custom outbound tag (usually a profile/group name)
+     * @param customOutboundTag The custom outbound tag (usually a profile/group remark)
      * @return true if the custom outbound was configured successfully, false otherwise
      */
     private fun configureCustomOutbound(v2rayConfig: V2rayConfig, customOutboundTag: String): Boolean {
         try {
-            // Try to find the profile/group by remarks (name)
+            Log.d(AppConfig.TAG, "Configuring custom outbound for tag: $customOutboundTag")
+
+            // Try to find the profile/group by remarks (exact match)
             val profile = SettingsManager.getServerViaRemarks(customOutboundTag)
-                ?: return false
+            if (profile == null) {
+                Log.d(AppConfig.TAG, "Custom outbound failed: no profile found with remarks '$customOutboundTag'")
+                return false
+            }
 
             // Policy groups are NOT supported as custom outbound tags
             if (profile.configType == EConfigType.POLICYGROUP) {
-                Log.d(AppConfig.TAG, "Policy group cannot be used as custom outbound tag: $customOutboundTag")
+                Log.d(AppConfig.TAG, "Custom outbound failed: policy groups cannot be used as custom outbound tag: $customOutboundTag")
                 return false
             }
 
             // Single profile - convert to outbound
-            val outbound = convertProfile2Outbound(profile) ?: return false
+            val outbound = convertProfile2Outbound(profile)
+            if (outbound == null) {
+                Log.d(AppConfig.TAG, "Custom outbound failed: convertProfile2Outbound returned null for protocol ${profile.configType}")
+                return false
+            }
+
             val ret = updateOutboundWithGlobalSettings(outbound)
-            if (!ret) return false
+            if (!ret) {
+                Log.d(AppConfig.TAG, "Custom outbound failed: updateOutboundWithGlobalSettings returned false")
+                return false
+            }
 
             // Set the custom tag
             outbound.tag = customOutboundTag
@@ -305,6 +330,9 @@ def modify_v2ray_config_manager():
             // Add to outbounds if not already present
             if (v2rayConfig.outbounds.none { it.tag == customOutboundTag }) {
                 v2rayConfig.outbounds.add(outbound)
+                Log.d(AppConfig.TAG, "Custom outbound added: $customOutboundTag")
+            } else {
+                Log.d(AppConfig.TAG, "Custom outbound already exists: $customOutboundTag")
             }
 
             // Check for chain proxy in subscription
@@ -341,6 +369,7 @@ def modify_v2ray_config_manager():
                     prevOutbound.tag = "${outbound.tag}-prev"
                     v2rayConfig.outbounds.add(prevOutbound)
                     outbound.ensureSockopt().dialerProxy = prevOutbound.tag
+                    Log.d(AppConfig.TAG, "Chain proxy (prev) added for $customOutboundTag")
                 }
             }
 
@@ -355,6 +384,7 @@ def modify_v2ray_config_manager():
                     val originalTag = outbound.tag
                     outbound.tag = "${originalTag}-orig"
                     nextOutbound.ensureSockopt().dialerProxy = outbound.tag
+                    Log.d(AppConfig.TAG, "Chain proxy (next) added for $customOutboundTag")
                 }
             }
         } catch (e: Exception) {
@@ -429,7 +459,11 @@ def main():
     if success_count == len(results):
         print("\n✅ All files modified successfully!")
         print("   The custom outbound feature is now ready.")
-        print("\nYou can rebuild the project – no manual steps remain.")
+        print("\n🔍 If the outbound still does not appear in the config, check logcat for:")
+        print("   • \"Custom outbound failed: no profile found with remarks '...'\"")
+        print("   • \"Custom outbound failed: convertProfile2Outbound returned null\"")
+        print("\n   Ensure that the profile remark matches **exactly** (case‑sensitive).")
+        print("\nYou can now rebuild and test the project.")
     else:
         print("\n❌ Some files failed to modify.")
         print("   Check the error messages above and manually apply the changes.")
