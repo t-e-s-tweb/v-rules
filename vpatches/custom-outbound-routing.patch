@@ -14,11 +14,11 @@ Features:
 - Chain proxy (prev/next) settings are respected for custom group outbounds
 
 ---
- .../main/java/com/v2ray/ang/dto/RulesetItem.kt    |   3 +-
- .../v2ray/ang/handler/V2rayConfigManager.kt       | 120 ++++++++++++++++--
- .../com/v2ray/ang/ui/RoutingEditActivity.kt       |  40 ++++++-
- .../res/layout/activity_routing_edit.xml          |  20 ++++
- .../app/src/main/res/values/arrays.xml            |   1 +
+ V2rayNG/app/src/main/java/com/v2ray/ang/dto/RulesetItem.kt    |   3 +-
+ V2rayNG/app/src/main/java/com/v2ray/ang/handler/V2rayConfigManager.kt       | 120 ++++++++++++++++--
+ V2rayNG/app/src/main/java/com/v2ray/ang/ui/RoutingEditActivity.kt       |  40 ++++++-
+ V2rayNG/app/src/main/res/layout/activity_routing_edit.xml          |  20 ++++
+ V2rayNG/app/src/main/res/values/arrays.xml            |   1 +
  5 files changed, 169 insertions(+), 15 deletions(-)
 
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/dto/RulesetItem.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/RulesetItem.kt
@@ -45,19 +45,17 @@ index 2fd57ba..1234567 100644
         <item>block</item>
 +        <item>custom</item>
     </string-array>
-
+ 
     <string-array name="xhttp_mode" translatable="false">
 
 diff --git a/V2rayNG/app/src/main/res/layout/activity_routing_edit.xml b/V2rayNG/app/src/main/res/layout/activity_routing_edit.xml
 index 1a86312..1234567 100644
 --- a/V2rayNG/app/src/main/res/layout/activity_routing_edit.xml
 +++ b/V2rayNG/app/src/main/res/layout/activity_routing_edit.xml
-@@ -176,6 +176,26 @@
-                     android:layout_marginTop="@dimen/padding_spacing_dp8"
-                     android:layout_marginBottom="@dimen/padding_spacing_dp8"
-                     android:entries="@array/outbound_tag" />
-             </LinearLayout>
-
+@@ -100,6 +100,26 @@
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
+ 
 +            <LinearLayout
 +                android:id="@+id/layout_custom_outbound"
 +                android:layout_width="match_parent"
@@ -65,12 +63,12 @@ index 1a86312..1234567 100644
 +                android:layout_marginTop="@dimen/padding_spacing_dp16"
 +                android:orientation="vertical"
 +                android:visibility="gone">
-
++
 +                <TextView
 +                    android:layout_width="wrap_content"
 +                    android:layout_height="wrap_content"
 +                    android:text="@string/routing_settings_custom_outbound_tag" />
-
++
 +                <EditText
 +                    android:id="@+id/et_custom_outbound_tag"
 +                    android:layout_width="match_parent"
@@ -78,12 +76,9 @@ index 1a86312..1234567 100644
 +                    android:inputType="text"
 +                    android:hint="@string/routing_settings_custom_outbound_hint" />
 +            </LinearLayout>
-
-         </LinearLayout>
-
-         <LinearLayout
-             android:layout_width="match_parent"
-             android:layout_height="wrap_content"
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
 
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/RoutingEditActivity.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/RoutingEditActivity.kt
 index 2435708..1234567 100644
@@ -104,14 +99,14 @@ index 2435708..1234567 100644
      }
 +    // Index of "custom" in the outbound_tag array (proxy=0, direct=1, block=2, custom=3)
 +    private val CUSTOM_OUTBOUND_INDEX = 3
-
+ 
      override fun onCreate(savedInstanceState: Bundle?) {
          super.onCreate(savedInstanceState)
 @@ -32,6 +35,19 @@ class RoutingEditActivity : BaseActivity() {
          } else {
              clearServer()
          }
-
++
 +        // Setup listener for outbound tag spinner
 +        binding.spOutboundTag.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
 +            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
@@ -120,18 +115,18 @@ index 2435708..1234567 100644
 +                    if (position == CUSTOM_OUTBOUND_INDEX) android.view.View.VISIBLE 
 +                    else android.view.View.GONE
 +            }
-
++
 +            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {
 +            }
 +        }
      }
-
+ 
      private fun bindingServer(rulesetItem: RulesetItem): Boolean {
 @@ -44,6 +60,15 @@ class RoutingEditActivity : BaseActivity() {
          binding.etNetwork.text = Utils.getEditable(rulesetItem.network)
          val outbound = Utils.arrayFind(outbound_tag, rulesetItem.outboundTag)
          binding.spOutboundTag.setSelection(outbound)
-
++
 +        // Set custom outbound tag if present
 +        if (rulesetItem.customOutboundTag.isNotNullEmpty()) {
 +            binding.etCustomOutboundTag.text = Utils.getEditable(rulesetItem.customOutboundTag)
@@ -142,7 +137,7 @@ index 2435708..1234567 100644
 +        }
          return true
      }
-
+ 
 @@ -51,6 +76,7 @@ class RoutingEditActivity : BaseActivity() {
          binding.etRemarks.text = null
          binding.spOutboundTag.setSelection(0)
@@ -150,13 +145,13 @@ index 2435708..1234567 100644
 +        binding.etCustomOutboundTag.text = null
          return true
      }
-
+ 
 @@ -58,7 +84,17 @@ class RoutingEditActivity : BaseActivity() {
          val rulesetItem = SettingsManager.getRoutingRuleset(position) ?: RulesetItem()
-
+ 
          rulesetItem.remarks = binding.etRemarks.text.toString()
 -        rulesetItem.outboundTag = outbound_tag[binding.spOutboundTag.selectedItemPosition]
-
++
 +        // Handle custom outbound tag
 +        val selectedOutboundPosition = binding.spOutboundTag.selectedItemPosition
 +        if (selectedOutboundPosition == CUSTOM_OUTBOUND_INDEX) {
@@ -188,7 +183,7 @@ index 8eca5fe..1234567 100644
 @@ -561,6 +564,17 @@ object V2rayConfigManager {
          return domain
      }
-
+ 
 +    /**
 +     * Checks if an outbound tag is a custom (user-defined) outbound.
 +     * Custom outbounds are those that don't match the standard tags (proxy, direct, block).
@@ -200,14 +195,13 @@ index 8eca5fe..1234567 100644
 +        return tag != AppConfig.TAG_PROXY && tag != AppConfig.TAG_DIRECT && tag != AppConfig.TAG_BLOCKED
 +    }
 +
-
      /**
       * Configures custom local DNS settings.
       *
 @@ -722,6 +736,52 @@ object V2rayConfigManager {
          return true
      }
-
+ 
 +    /**
 +     * Configures a custom outbound with chain proxy support.
 +     * This is used when a routing rule specifies a custom outbound tag.
@@ -253,14 +247,13 @@ index 8eca5fe..1234567 100644
 +        }
 +    }
 +
-
      /**
       * Updates outbound settings based on global preferences.
       *
 @@ -1000,6 +1060,48 @@ object V2rayConfigManager {
          return true
      }
-
+ 
 +    /**
 +     * Sets up chain proxy (prev/next) for a custom outbound.
 +     *
@@ -304,7 +297,6 @@ index 8eca5fe..1234567 100644
 +        }
 +    }
 +
-
      /**
       * Resolves domain names to IP addresses in outbound connections.
       *
@@ -353,14 +345,14 @@ index 8eca5fe..1234567 100644
 +                        // Fallback - use the tag directly
 +                        rulesBean.outboundTag = key.outboundTag
 +                    }
-                 }
-
-                 // Domain rules
-@@ -1160,6 +1262,14 @@ object V2rayConfigManager {
-                 v2rayConfig.routing.rules.add(rulesBean)
              }
-         }
 
+             // Domain rules
+@@ -1160,6 +1262,14 @@ object V2rayConfigManager {
+             v2rayConfig.routing.rules.add(rulesBean)
+         }
+     }
++
 +            // Configure custom outbounds after processing all rules
 +            customOutbounds.forEach { customTag ->
 +                configureCustomOutbound(v2rayConfig, customTag)
