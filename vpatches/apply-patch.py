@@ -122,8 +122,8 @@ def modify_routing_edit_activity():
     # 1. Add import
     content = content.replace(
         'import com.v2ray.ang.extension.nullIfBlank',
-        'import com.v2ray.ang.extension.nullIfBlank
-import com.v2ray.ang.extension.isNotNullEmpty'
+        '''import com.v2ray.ang.extension.nullIfBlank
+import com.v2ray.ang.extension.isNotNullEmpty'''
     )
 
     # 2. Add constant
