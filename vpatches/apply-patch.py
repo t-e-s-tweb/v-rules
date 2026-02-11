@@ -222,8 +222,14 @@ def modify_v2ray_config_manager():
     if not os.path.exists(filepath):
         print(f"  ✗ File not found")
         return False
+
     with open(filepath, 'r') as f:
         content = f.read()
+
+    # Guard: skip if already patched
+    if "private fun configureCustomOutbound" in content:
+        print("  ✓ Custom outbound methods already present – skipping")
+        return True
 
     # ---- 1. Add check in getUserRule2Domain ----
     content = content.replace(
@@ -253,10 +259,14 @@ def modify_v2ray_config_manager():
     /**'''
     )
 
-    # ---- 3. Add configureCustomOutbound method (FIXED: no undefined function) ----
-    content = content.replace(
-        '        updateOutboundFragment(v2rayConfig)\n        return true\n    }\n\n    /**',
-        '''        updateOutboundFragment(v2rayConfig)
+    # ---- 3. Insert configureCustomOutbound + setupChainProxyForOutbound together ----
+    # Replace the exact end of updateOutboundFragment
+    old_block = '''        updateOutboundFragment(v2rayConfig)
+        return true
+    }
+
+    /**'''
+    new_block = '''        updateOutboundFragment(v2rayConfig)
         return true
     }
 
@@ -305,15 +315,6 @@ def modify_v2ray_config_manager():
         }
     }
 
-    /**'''
-    )
-
-    # ---- 4. Add setupChainProxyForOutbound method ----
-    content = content.replace(
-        '        return true\n    }\n\n    /**',
-        '''        return true
-    }
-
     /**
      * Sets up chain proxy (prev/next) for a custom outbound.
      *
@@ -321,7 +322,7 @@ def modify_v2ray_config_manager():
      * @param outbound The outbound to setup chain proxy for
      * @param subscriptionId The subscription ID to look up chain settings
      */
-    private fun setupChainProxyForOutbound(v2rayConfig: V2rayConfig, outbound: OutboundBean, subscriptionId: String) {
+    private fun setupChainProxyForOutbound(v2rayConfig: V2rayConfig, outbound: V2rayConfig.OutboundBean, subscriptionId: String) {
         if (subscriptionId.isEmpty()) return
 
         try {
@@ -358,9 +359,9 @@ def modify_v2ray_config_manager():
     }
 
     /**'''
-    )
+    content = content.replace(old_block, new_block)
 
-    # ---- 5. Modify getRouting ----
+    # ---- 4. Modify getRouting ----
     content = content.replace(
         '            val rulesetItems = MmkvManager.decodeRoutingRulesets()\n            rulesetItems?.forEach { key ->\n                getRoutingUserRule(key, v2rayConfig)',
         '''            val rulesetItems = MmkvManager.decodeRoutingRulesets()
@@ -379,14 +380,9 @@ def modify_v2ray_config_manager():
             }'''
     )
 
-    # ---- Final sanity check: ensure createInitOutbound still exists ----
-    if "fun createInitOutbound" not in content:
-        print("  ✗ CRITICAL: createInitOutbound function missing after patch!")
-        return False
-
     with open(filepath, 'w') as f:
         f.write(content)
-    print("  ✓ Added custom outbound support to V2rayConfigManager")
+    print("  ✓ Added custom outbound methods to V2rayConfigManager")
     return True
 
 def main():
