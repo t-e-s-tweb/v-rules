@@ -126,11 +126,7 @@ def modify_routing_edit_activity():
     private val CUSTOM_OUTBOUND_INDEX = 3'''
     )
 
-    # ---- 3. Rewrite bindingServer to handle custom outbound tags correctly ----
-    # Replace the whole bindingServer function with a version that:
-    #   - loads the custom tag into the EditText
-    #   - sets spinner selection to CUSTOM_OUTBOUND_INDEX if the tag is not standard
-    #   - forces visibility of the custom layout
+    # ---- 3. Rewrite bindingServer to handle custom outbound tags ----
     old_binding = '''    private fun bindingServer(rulesetItem: RulesetItem): Boolean {
         binding.etRemarks.text = Utils.getEditable(rulesetItem.remarks)
         binding.chkLocked.isChecked = rulesetItem.locked == true
@@ -159,7 +155,6 @@ def modify_routing_edit_activity():
             // Custom outbound tag – select "custom" and fill the EditText
             binding.spOutboundTag.setSelection(CUSTOM_OUTBOUND_INDEX)
             binding.etCustomOutboundTag.text = Utils.getEditable(rulesetItem.outboundTag)
-            // Make sure the custom layout is visible
             binding.layoutCustomOutbound.visibility = android.view.View.VISIBLE
         } else {
             // Standard tag – select it and clear the custom EditText
@@ -180,13 +175,13 @@ def modify_routing_edit_activity():
         return False
     content = content.replace(old_binding, new_binding)
 
-    # ---- 4. Modify clearServer to also clear the custom EditText ----
+    # ---- 4. Modify clearServer ----
     content = content.replace(
         '        binding.spOutboundTag.setSelection(0)\n        return true',
         '        binding.spOutboundTag.setSelection(0)\n        binding.etCustomOutboundTag.text = null\n        return true'
     )
 
-    # ---- 5. Modify saveServer (already good) ----
+    # ---- 5. Modify saveServer ----
     content = content.replace(
         '            outboundTag = outbound_tag[binding.spOutboundTag.selectedItemPosition]',
         '''            // Handle custom outbound tag
@@ -205,7 +200,7 @@ def modify_routing_edit_activity():
             }'''
     )
 
-    # ---- 6. Replace the end of onCreate: add listener, pre‑fill, and auto‑select "custom" ----
+    # ---- 6. Replace the end of onCreate: add listener and pre‑fill ----
     pattern = r'(        }\n    })'
     replacement = r'''        }
 
@@ -225,9 +220,7 @@ def modify_routing_edit_activity():
                 val currentServer = MmkvManager.decodeServerConfig(currentGuid)
                 if (currentServer != null && !currentServer.remarks.isNullOrEmpty()) {
                     binding.etCustomOutboundTag.text = Utils.getEditable(currentServer.remarks)
-                    // Auto-select "custom" in the spinner so the user doesn't have to
                     binding.spOutboundTag.setSelection(CUSTOM_OUTBOUND_INDEX)
-                    // Force the custom layout to be visible (listener will also handle it)
                     binding.layoutCustomOutbound.visibility = android.view.View.VISIBLE
                 }
             }
@@ -261,7 +254,10 @@ def modify_v2ray_config_manager():
     r1 = r'''\1
                 // Skip custom outbounds - they should not be treated as standard tags
                 if (isCustomOutboundTag(key.outboundTag)) return@forEach'''
-    content = re.sub(p1, r1, content, flags=re.MULTILINE)
+    content, n1 = re.subn(p1, r1, content, flags=re.MULTILINE)
+    if n1 == 0:
+        print("  ✗ Failed to patch getUserRule2Domain")
+        return False
 
     # ---- 2. Add isCustomOutboundTag method ----
     p2 = r'(        return domain\n    }\n\n    /\*\*)'
@@ -279,9 +275,12 @@ def modify_v2ray_config_manager():
     }
 
     /**'''
-    content = re.sub(p2, r2, content, flags=re.MULTILINE)
+    content, n2 = re.subn(p2, r2, content, flags=re.MULTILINE)
+    if n2 == 0:
+        print("  ✗ Failed to insert isCustomOutboundTag")
+        return False
 
-    # ---- 3. Add configureCustomOutbound + setupChainProxyForOutbound (visible logs) ----
+    # ---- 3. Insert configureCustomOutbound + setupChainProxyForOutbound (FIXED: no trailing /**) ----
     p3 = r'(        updateOutboundFragment\(v2rayConfig\)\n        return true\n    }\n\n    /\*\*)'
     r3 = r'''\1
 
@@ -358,9 +357,11 @@ def modify_v2ray_config_manager():
             Log.e(AppConfig.TAG, "❌ Chain proxy failed", e)
         }
     }
-
-    /**'''
-    content = re.sub(p3, r3, content, flags=re.MULTILINE)
+'''
+    content, n3 = re.subn(p3, r3, content, flags=re.MULTILINE)
+    if n3 == 0:
+        print("  ✗ Failed to insert custom outbound methods")
+        return False
 
     # ---- 4. Modify getRouting: collect and process custom outbounds ----
     p4 = r'(            val rulesetItems = MmkvManager\.decodeRoutingRulesets\(\)\n            rulesetItems\?\.forEach \{ key ->\n                getRoutingUserRule\(key, v2rayConfig\))'
@@ -374,7 +375,10 @@ def modify_v2ray_config_manager():
             }
             Log.i(AppConfig.TAG, "🎯 Custom outbound tags: $customOutbounds")
             customOutbounds.forEach { configureCustomOutbound(v2rayConfig, it) }'''
-    content = re.sub(p4, r4, content, flags=re.MULTILINE)
+    content, n4 = re.subn(p4, r4, content, flags=re.MULTILINE)
+    if n4 == 0:
+        print("  ✗ Failed to patch getRouting")
+        return False
 
     with open(filepath, 'w') as f:
         f.write(content)
@@ -405,11 +409,9 @@ def main():
     print(f"\n✅ {success}/{len(results)} files patched successfully.")
     if success == len(results):
         print("\n👉 Rebuild the app and test a routing rule with 'custom' outbound.")
-        print("   - New rules: the spinner is automatically set to 'custom' and pre‑filled with the current server's remark.")
-        print("   - Existing custom rules: the spinner is set to 'custom' and the tag is loaded.")
-        print("\n📱 Check logcat (filter 'v2rayNG') to confirm:")
-        print('   adb logcat -s v2rayNG')
-        print("   You should see: 🎯 Custom outbound tags: [...] ✅ Custom outbound added: ...")
+        print("   - New rules: spinner automatically set to 'custom' and pre‑filled with the current server's remark.")
+        print("   - Existing custom rules: spinner set to 'custom' and tag loaded.")
+        print("\n📱 Check logcat (filter 'v2rayNG') to confirm the custom outbound is added.")
     else:
         print("\n❌ Some patches failed – check the error messages above.")
 
