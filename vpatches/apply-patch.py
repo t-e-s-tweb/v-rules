@@ -126,30 +126,67 @@ def modify_routing_edit_activity():
     private val CUSTOM_OUTBOUND_INDEX = 3'''
     )
 
-    # ---- 3. Modify bindingServer (load custom tag) ----
-    content = content.replace(
-        '        binding.spOutboundTag.setSelection(outbound)\n\n        return true',
-        '''        binding.spOutboundTag.setSelection(outbound)
+    # ---- 3. Rewrite bindingServer to handle custom outbound tags correctly ----
+    # Replace the whole bindingServer function with a version that:
+    #   - loads the custom tag into the EditText
+    #   - sets spinner selection to CUSTOM_OUTBOUND_INDEX if the tag is not standard
+    #   - forces visibility of the custom layout
+    old_binding = '''    private fun bindingServer(rulesetItem: RulesetItem): Boolean {
+        binding.etRemarks.text = Utils.getEditable(rulesetItem.remarks)
+        binding.chkLocked.isChecked = rulesetItem.locked == true
+        binding.etDomain.text = Utils.getEditable(rulesetItem.domain?.joinToString(","))
+        binding.etIp.text = Utils.getEditable(rulesetItem.ip?.joinToString(","))
+        binding.etPort.text = Utils.getEditable(rulesetItem.port)
+        binding.etProtocol.text = Utils.getEditable(rulesetItem.protocol?.joinToString(","))
+        binding.etNetwork.text = Utils.getEditable(rulesetItem.network)
+        val outbound = Utils.arrayFind(outbound_tag, rulesetItem.outboundTag)
+        binding.spOutboundTag.setSelection(outbound)
 
-        // Set custom outbound tag if present
-        if (rulesetItem.customOutboundTag.isNotNullEmpty()) {
-            binding.etCustomOutboundTag.text = Utils.getEditable(rulesetItem.customOutboundTag)
-            // If outboundTag is not in standard list, it might be a custom value
-            if (outbound == -1 && rulesetItem.outboundTag.isNotNullEmpty()) {
-                binding.etCustomOutboundTag.text = Utils.getEditable(rulesetItem.outboundTag)
-            }
+        return true
+    }'''
+    new_binding = '''    private fun bindingServer(rulesetItem: RulesetItem): Boolean {
+        binding.etRemarks.text = Utils.getEditable(rulesetItem.remarks)
+        binding.chkLocked.isChecked = rulesetItem.locked == true
+        binding.etDomain.text = Utils.getEditable(rulesetItem.domain?.joinToString(","))
+        binding.etIp.text = Utils.getEditable(rulesetItem.ip?.joinToString(","))
+        binding.etPort.text = Utils.getEditable(rulesetItem.port)
+        binding.etProtocol.text = Utils.getEditable(rulesetItem.protocol?.joinToString(","))
+        binding.etNetwork.text = Utils.getEditable(rulesetItem.network)
+
+        // Check if the outboundTag is one of the standard tags
+        val outboundIndex = Utils.arrayFind(outbound_tag, rulesetItem.outboundTag)
+        if (outboundIndex == -1) {
+            // Custom outbound tag – select "custom" and fill the EditText
+            binding.spOutboundTag.setSelection(CUSTOM_OUTBOUND_INDEX)
+            binding.etCustomOutboundTag.text = Utils.getEditable(rulesetItem.outboundTag)
+            // Make sure the custom layout is visible
+            binding.layoutCustomOutbound.visibility = android.view.View.VISIBLE
+        } else {
+            // Standard tag – select it and clear the custom EditText
+            binding.spOutboundTag.setSelection(outboundIndex)
+            binding.etCustomOutboundTag.text = null
+            binding.layoutCustomOutbound.visibility = android.view.View.GONE
         }
 
-        return true'''
-    )
+        // Also load the saved customOutboundTag if present (for backward compatibility)
+        if (rulesetItem.customOutboundTag.isNotNullEmpty()) {
+            binding.etCustomOutboundTag.text = Utils.getEditable(rulesetItem.customOutboundTag)
+        }
 
-    # ---- 4. Modify clearServer (clear custom tag) ----
+        return true
+    }'''
+    if old_binding not in content:
+        print("  ✗ Could not find original bindingServer function")
+        return False
+    content = content.replace(old_binding, new_binding)
+
+    # ---- 4. Modify clearServer to also clear the custom EditText ----
     content = content.replace(
         '        binding.spOutboundTag.setSelection(0)\n        return true',
         '        binding.spOutboundTag.setSelection(0)\n        binding.etCustomOutboundTag.text = null\n        return true'
     )
 
-    # ---- 5. Modify saveServer (validate and save custom tag) ----
+    # ---- 5. Modify saveServer (already good) ----
     content = content.replace(
         '            outboundTag = outbound_tag[binding.spOutboundTag.selectedItemPosition]',
         '''            // Handle custom outbound tag
@@ -168,19 +205,7 @@ def modify_routing_edit_activity():
             }'''
     )
 
-    # ---- 6. Replace the end of onCreate: add spinner listener AND pre-fill custom tag ----
-    # Original end: "... } else { clearServer() } }"
-    # We replace the final "        }\n    }" with a block that contains:
-    #   - the else block closing
-    #   - the listener
-    #   - pre-fill code for new rules
-    #   - the method closing brace
-    #
-    # The exact pattern we need to match is the two closing braces at the end of onCreate:
-    #         }   // closes else
-    #     }       // closes method
-    #
-    # We'll capture the indentation before the first } and reuse it.
+    # ---- 6. Replace the end of onCreate: add listener, pre‑fill, and auto‑select "custom" ----
     pattern = r'(        }\n    })'
     replacement = r'''        }
 
@@ -192,19 +217,22 @@ def modify_routing_edit_activity():
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
 
-        // Pre-fill custom outbound tag with the currently selected server's remark for new rules
+        // For new rules: pre-fill custom outbound tag with the currently selected server's remark
+        // and automatically select the "custom" option in the spinner
         if (position == -1) {
             val currentGuid = MmkvManager.getSelectedServer()
             if (currentGuid != null) {
                 val currentServer = MmkvManager.decodeServerConfig(currentGuid)
-                if (currentServer != null) {
+                if (currentServer != null && !currentServer.remarks.isNullOrEmpty()) {
                     binding.etCustomOutboundTag.text = Utils.getEditable(currentServer.remarks)
+                    // Auto-select "custom" in the spinner so the user doesn't have to
+                    binding.spOutboundTag.setSelection(CUSTOM_OUTBOUND_INDEX)
+                    // Force the custom layout to be visible (listener will also handle it)
+                    binding.layoutCustomOutbound.visibility = android.view.View.VISIBLE
                 }
             }
         }
     }'''
-    # Ensure we only replace the very last occurrence
-    # Split content, replace last occurrence
     parts = content.rsplit(pattern, 1)
     if len(parts) == 2:
         content = parts[0] + replacement + parts[1]
@@ -355,7 +383,7 @@ def modify_v2ray_config_manager():
 
 def main():
     print("=" * 70)
-    print("Custom Outbound Patcher – Pre‑fills Current Server Remark")
+    print("Custom Outbound Patcher – Auto‑selects ‘custom’ spinner")
     print("=" * 70)
     results = []
     for name, func in [
@@ -376,9 +404,12 @@ def main():
     success = sum(1 for _, ok in results if ok)
     print(f"\n✅ {success}/{len(results)} files patched successfully.")
     if success == len(results):
-        print("\n👉 Rebuild the app and test a new routing rule with 'custom' outbound.")
-        print("   The custom outbound tag will be pre‑filled with the currently selected server's remark.")
-        print("   Check logcat (filter 'v2rayNG') to confirm the outbound is added.")
+        print("\n👉 Rebuild the app and test a routing rule with 'custom' outbound.")
+        print("   - New rules: the spinner is automatically set to 'custom' and pre‑filled with the current server's remark.")
+        print("   - Existing custom rules: the spinner is set to 'custom' and the tag is loaded.")
+        print("\n📱 Check logcat (filter 'v2rayNG') to confirm:")
+        print('   adb logcat -s v2rayNG')
+        print("   You should see: 🎯 Custom outbound tags: [...] ✅ Custom outbound added: ...")
     else:
         print("\n❌ Some patches failed – check the error messages above.")
 
