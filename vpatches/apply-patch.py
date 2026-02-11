@@ -200,7 +200,8 @@ def modify_routing_edit_activity():
             }'''
     )
 
-    # ---- 6. Replace the end of onCreate: add listener and pre‑fill ----
+    # ---- 6. Replace the end of onCreate: add spinner listener ONLY ----
+    # (No auto‑prefill for new rules – user must select "custom" and type the tag manually)
     pattern = r'(        }\n    })'
     replacement = r'''        }
 
@@ -210,20 +211,6 @@ def modify_routing_edit_activity():
                 binding.layoutCustomOutbound.visibility = if (position == CUSTOM_OUTBOUND_INDEX) android.view.View.VISIBLE else android.view.View.GONE
             }
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
-        }
-
-        // For new rules: pre-fill custom outbound tag with the currently selected server's remark
-        // and automatically select the "custom" option in the spinner
-        if (position == -1) {
-            val currentGuid = MmkvManager.getSelectedServer()
-            if (currentGuid != null) {
-                val currentServer = MmkvManager.decodeServerConfig(currentGuid)
-                if (currentServer != null && !currentServer.remarks.isNullOrEmpty()) {
-                    binding.etCustomOutboundTag.text = Utils.getEditable(currentServer.remarks)
-                    binding.spOutboundTag.setSelection(CUSTOM_OUTBOUND_INDEX)
-                    binding.layoutCustomOutbound.visibility = android.view.View.VISIBLE
-                }
-            }
         }
     }'''
     parts = content.rsplit(pattern, 1)
@@ -280,12 +267,14 @@ def modify_v2ray_config_manager():
         print("  ✗ Failed to insert isCustomOutboundTag")
         return False
 
-    # ---- 3. Insert configureCustomOutbound + setupChainProxyForOutbound (FIXED: no trailing /**) ----
+    # ---- 3. Insert configureCustomOutbound + setupChainProxyForOutbound ----
+    # Adds custom outbound at INDEX 0 (beginning of list) so it exists before routing rules
     p3 = r'(        updateOutboundFragment\(v2rayConfig\)\n        return true\n    }\n\n    /\*\*)'
     r3 = r'''\1
 
     /**
      * Configures a custom outbound with chain proxy support.
+     * Adds the outbound at the beginning of the list (index 0) so it's defined before routing rules.
      */
     private fun configureCustomOutbound(v2rayConfig: V2rayConfig, customOutboundTag: String): Boolean {
         try {
@@ -308,12 +297,15 @@ def modify_v2ray_config_manager():
                 return false
             }
             outbound.tag = customOutboundTag
+
+            // Add at the beginning of outbounds list so it's available for routing rules
             if (v2rayConfig.outbounds.none { it.tag == customOutboundTag }) {
-                v2rayConfig.outbounds.add(outbound)
-                Log.i(AppConfig.TAG, "✅ Custom outbound added: $customOutboundTag")
+                v2rayConfig.outbounds.add(0, outbound)
+                Log.i(AppConfig.TAG, "✅ Custom outbound added at index 0: $customOutboundTag")
             } else {
                 Log.i(AppConfig.TAG, "ℹ️ Custom outbound already exists: $customOutboundTag")
             }
+
             if (!profile.subscriptionId.isNullOrEmpty()) {
                 setupChainProxyForOutbound(v2rayConfig, outbound, profile.subscriptionId)
             }
@@ -363,7 +355,7 @@ def modify_v2ray_config_manager():
         print("  ✗ Failed to insert custom outbound methods")
         return False
 
-    # ---- 4. Modify getRouting: collect and process custom outbounds ----
+    # ---- 4. REWRITE getRouting: configure custom outbounds FIRST, THEN add routing rules ----
     p4 = r'(            val rulesetItems = MmkvManager\.decodeRoutingRulesets\(\)\n            rulesetItems\?\.forEach \{ key ->\n                getRoutingUserRule\(key, v2rayConfig\))'
     r4 = r'''            val rulesetItems = MmkvManager.decodeRoutingRulesets()
             val customOutbounds = mutableSetOf<String>()
@@ -371,10 +363,14 @@ def modify_v2ray_config_manager():
                 if (key.enabled && isCustomOutboundTag(key.outboundTag)) {
                     customOutbounds.add(key.outboundTag)
                 }
-                getRoutingUserRule(key, v2rayConfig)
             }
             Log.i(AppConfig.TAG, "🎯 Custom outbound tags: $customOutbounds")
-            customOutbounds.forEach { configureCustomOutbound(v2rayConfig, it) }'''
+            // Configure custom outbounds BEFORE adding routing rules that reference them
+            customOutbounds.forEach { configureCustomOutbound(v2rayConfig, it) }
+            // Now add all routing rules
+            rulesetItems?.forEach { key ->
+                getRoutingUserRule(key, v2rayConfig)
+            }'''
     content, n4 = re.subn(p4, r4, content, flags=re.MULTILINE)
     if n4 == 0:
         print("  ✗ Failed to patch getRouting")
@@ -387,7 +383,7 @@ def modify_v2ray_config_manager():
 
 def main():
     print("=" * 70)
-    print("Custom Outbound Patcher – Auto‑selects ‘custom’ spinner")
+    print("Custom Outbound Patcher – Manual Entry + Correct Order")
     print("=" * 70)
     results = []
     for name, func in [
@@ -409,9 +405,13 @@ def main():
     print(f"\n✅ {success}/{len(results)} files patched successfully.")
     if success == len(results):
         print("\n👉 Rebuild the app and test a routing rule with 'custom' outbound.")
-        print("   - New rules: spinner automatically set to 'custom' and pre‑filled with the current server's remark.")
-        print("   - Existing custom rules: spinner set to 'custom' and tag loaded.")
-        print("\n📱 Check logcat (filter 'v2rayNG') to confirm the custom outbound is added.")
+        print("   - When creating a new rule, the spinner defaults to 'proxy'.")
+        print("   - Select 'custom' from the spinner – the custom input field appears.")
+        print("   - Type the EXACT remark of an existing server and save.")
+        print("\n📱 Check logcat (filter 'v2rayNG') to confirm:")
+        print('   adb logcat -s v2rayNG')
+        print("   You should see: 🎯 Custom outbound tags: [...] ✅ Custom outbound added at index 0: ...")
+        print("\n   The routing rule will now correctly use the custom outbound.")
     else:
         print("\n❌ Some patches failed – check the error messages above.")
 
