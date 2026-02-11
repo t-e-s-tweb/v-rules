@@ -52,9 +52,11 @@ diff --git a/V2rayNG/app/src/main/res/layout/activity_routing_edit.xml b/V2rayNG
 index 1a86312..1234567 100644
 --- a/V2rayNG/app/src/main/res/layout/activity_routing_edit.xml
 +++ b/V2rayNG/app/src/main/res/layout/activity_routing_edit.xml
-@@ -100,6 +100,26 @@
-                    android:layout_height="wrap_content" />
-            </LinearLayout>
+@@ -176,6 +176,26 @@
+                     android:layout_marginTop="@dimen/padding_spacing_dp8"
+                     android:layout_marginBottom="@dimen/padding_spacing_dp8"
+                     android:entries="@array/outbound_tag" />
+             </LinearLayout>
 
 +            <LinearLayout
 +                android:id="@+id/layout_custom_outbound"
@@ -76,9 +78,12 @@ index 1a86312..1234567 100644
 +                    android:inputType="text"
 +                    android:hint="@string/routing_settings_custom_outbound_hint" />
 +            </LinearLayout>
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
+
+         </LinearLayout>
+
+         <LinearLayout
+             android:layout_width="match_parent"
+             android:layout_height="wrap_content"
 
 diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/RoutingEditActivity.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/RoutingEditActivity.kt
 index 2435708..1234567 100644
@@ -195,6 +200,7 @@ index 8eca5fe..1234567 100644
 +        return tag != AppConfig.TAG_PROXY && tag != AppConfig.TAG_DIRECT && tag != AppConfig.TAG_BLOCKED
 +    }
 +
+
      /**
       * Configures custom local DNS settings.
       *
@@ -247,6 +253,7 @@ index 8eca5fe..1234567 100644
 +        }
 +    }
 +
+
      /**
       * Updates outbound settings based on global preferences.
       *
@@ -297,6 +304,7 @@ index 8eca5fe..1234567 100644
 +        }
 +    }
 +
+
      /**
       * Resolves domain names to IP addresses in outbound connections.
       *
