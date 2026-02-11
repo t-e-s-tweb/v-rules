@@ -14,7 +14,7 @@ Features:
 - Chain proxy (prev/next) settings are respected for custom group outbounds
 
 ---
- V2rayNG/app/src/main/java/com/v2ray/ang/dto/RulesetItem.kt    |   3 +-
+ V2rayNG/app/src/main/java/com/v2ray/ang/dto/RulesetItem.kt    |   1 +
  V2rayNG/app/src/main/java/com/v2ray/ang/handler/V2rayConfigManager.kt       | 120 ++++++++++++++++--
  V2rayNG/app/src/main/java/com/v2ray/ang/ui/RoutingEditActivity.kt       |  40 ++++++-
  V2rayNG/app/src/main/res/layout/activity_routing_edit.xml          |  20 ++++
@@ -345,13 +345,13 @@ index 8eca5fe..1234567 100644
 +                        // Fallback - use the tag directly
 +                        rulesBean.outboundTag = key.outboundTag
 +                    }
-             }
-
-             // Domain rules
+                 }
+ 
+                 // Domain rules
 @@ -1160,6 +1262,14 @@ object V2rayConfigManager {
-             v2rayConfig.routing.rules.add(rulesBean)
+                 v2rayConfig.routing.rules.add(rulesBean)
+             }
          }
-     }
 +
 +            // Configure custom outbounds after processing all rules
 +            customOutbounds.forEach { customTag ->
@@ -362,7 +362,7 @@ index 8eca5fe..1234567 100644
 +            Log.e(AppConfig.TAG, "Failed to configure routing", e)
 +        }
      }
-
+ 
      /**
 -- 
 2.34.1
