@@ -1,0 +1,369 @@
+From: Assistant <assistant@example.com>
+Date: Wed, 11 Feb 2026 00:00:00 +0000
+Subject: [PATCH] Add custom outbound support in routing settings
+
+This patch adds the ability to set custom outbound tags in routing settings.
+Previously, only 'proxy', 'direct', and 'block' were supported.
+Now users can specify a custom outbound name which will be included in
+the generated V2Ray config.
+
+Features:
+- Added 'custom' option to outbound tag spinner in routing rules
+- Added EditText for entering custom outbound tag name
+- Custom outbounds are properly included in generated V2Ray config
+- Chain proxy (prev/next) settings are respected for custom group outbounds
+
+---
+ .../main/java/com/v2ray/ang/dto/RulesetItem.kt    |   3 +-
+ .../v2ray/ang/handler/V2rayConfigManager.kt       | 120 ++++++++++++++++--
+ .../com/v2ray/ang/ui/RoutingEditActivity.kt       |  40 ++++++-
+ .../res/layout/activity_routing_edit.xml          |  20 ++++
+ .../app/src/main/res/values/arrays.xml            |   1 +
+ 5 files changed, 169 insertions(+), 15 deletions(-)
+
+diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/dto/RulesetItem.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/RulesetItem.kt
+index a0e73a9..1234567 100644
+--- a/V2rayNG/app/src/main/java/com/v2ray/ang/dto/RulesetItem.kt
++++ b/V2rayNG/app/src/main/java/com/v2ray/ang/dto/RulesetItem.kt
+@@ -9,4 +9,5 @@ data class RulesetItem(
+     var network: String? = null,
+     var protocol: List<String>? = null,
+     var enabled: Boolean = true,
+-    var locked: Boolean? = false,
++    var locked: Boolean? = false,
++    var customOutboundTag: String? = null,
+ )
+\ No newline at end of file
+
+diff --git a/V2rayNG/app/src/main/res/values/arrays.xml b/V2rayNG/app/src/main/res/values/arrays.xml
+index 2fd57ba..1234567 100644
+--- a/V2rayNG/app/src/main/res/values/arrays.xml
++++ b/V2rayNG/app/src/main/res/values/arrays.xml
+@@ -143,6 +143,7 @@
+         <item>proxy</item>
+         <item>direct</item>
+         <item>block</item>
++        <item>custom</item>
+     </string-array>
+ 
+     <string-array name="xhttp_mode" translatable="false">
+
+diff --git a/V2rayNG/app/src/main/res/layout/activity_routing_edit.xml b/V2rayNG/app/src/main/res/layout/activity_routing_edit.xml
+index 1a86312..1234567 100644
+--- a/V2rayNG/app/src/main/res/layout/activity_routing_edit.xml
++++ b/V2rayNG/app/src/main/res/layout/activity_routing_edit.xml
+@@ -100,6 +100,26 @@
+                     android:layout_height="wrap_content" />
+             </LinearLayout>
+ 
++            <LinearLayout
++                android:id="@+id/layout_custom_outbound"
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:layout_marginTop="@dimen/padding_spacing_dp16"
++                android:orientation="vertical"
++                android:visibility="gone">
++
++                <TextView
++                    android:layout_width="wrap_content"
++                    android:layout_height="wrap_content"
++                    android:text="@string/routing_settings_custom_outbound_tag" />
++
++                <EditText
++                    android:id="@+id/et_custom_outbound_tag"
++                    android:layout_width="match_parent"
++                    android:layout_height="wrap_content"
++                    android:inputType="text"
++                    android:hint="@string/routing_settings_custom_outbound_hint" />
++            </LinearLayout>
++
+             <LinearLayout
+                 android:layout_width="match_parent"
+                 android:layout_height="wrap_content"
+
+diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/RoutingEditActivity.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/RoutingEditActivity.kt
+index 2435708..1234567 100644
+--- a/V2rayNG/app/src/main/java/com/v2ray/ang/ui/RoutingEditActivity.kt
++++ b/V2rayNG/app/src/main/java/com/v2ray/ang/ui/RoutingEditActivity.kt
+@@ -9,6 +9,7 @@ import com.v2ray.ang.R
+ import com.v2ray.ang.databinding.ActivityRoutingEditBinding
+ import com.v2ray.ang.dto.RulesetItem
+ import com.v2ray.ang.extension.nullIfBlank
++import com.v2ray.ang.extension.isNotNullEmpty
+ import com.v2ray.ang.extension.toast
+ import com.v2ray.ang.extension.toastSuccess
+ import com.v2ray.ang.handler.SettingsManager
+@@ -22,6 +23,8 @@ class RoutingEditActivity : BaseActivity() {
+     private val position by lazy { intent.getIntExtra("position", -1) }
+     private val outbound_tag: Array<out String> by lazy {
+         resources.getStringArray(R.array.outbound_tag)
+     }
++    // Index of "custom" in the outbound_tag array (proxy=0, direct=1, block=2, custom=3)
++    private val CUSTOM_OUTBOUND_INDEX = 3
+ 
+     override fun onCreate(savedInstanceState: Bundle?) {
+         super.onCreate(savedInstanceState)
+@@ -32,6 +35,19 @@ class RoutingEditActivity : BaseActivity() {
+         } else {
+             clearServer()
+         }
++
++        // Setup listener for outbound tag spinner
++        binding.spOutboundTag.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
++            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
++                // Show/hide custom outbound input based on selection
++                binding.layoutCustomOutbound.visibility = 
++                    if (position == CUSTOM_OUTBOUND_INDEX) android.view.View.VISIBLE 
++                    else android.view.View.GONE
++            }
++
++            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {
++            }
++        }
+     }
+ 
+     private fun bindingServer(rulesetItem: RulesetItem): Boolean {
+@@ -44,6 +60,15 @@ class RoutingEditActivity : BaseActivity() {
+         binding.etNetwork.text = Utils.getEditable(rulesetItem.network)
+         val outbound = Utils.arrayFind(outbound_tag, rulesetItem.outboundTag)
+         binding.spOutboundTag.setSelection(outbound)
++
++        // Set custom outbound tag if present
++        if (rulesetItem.customOutboundTag.isNotNullEmpty()) {
++            binding.etCustomOutboundTag.text = Utils.getEditable(rulesetItem.customOutboundTag)
++            // If outboundTag is not in standard list, it might be a custom value
++            if (outbound == -1 && rulesetItem.outboundTag.isNotNullEmpty()) {
++                binding.etCustomOutboundTag.text = Utils.getEditable(rulesetItem.outboundTag)
++            }
++        }
+         return true
+     }
+ 
+@@ -51,6 +76,7 @@ class RoutingEditActivity : BaseActivity() {
+         binding.etRemarks.text = null
+         binding.spOutboundTag.setSelection(0)
+         binding.chkLocked.isChecked = false
++        binding.etCustomOutboundTag.text = null
+         return true
+     }
+ 
+@@ -58,7 +84,17 @@ class RoutingEditActivity : BaseActivity() {
+         val rulesetItem = SettingsManager.getRoutingRuleset(position) ?: RulesetItem()
+ 
+         rulesetItem.remarks = binding.etRemarks.text.toString()
+-        rulesetItem.outboundTag = outbound_tag[binding.spOutboundTag.selectedItemPosition]
++
++        // Handle custom outbound tag
++        val selectedOutboundPosition = binding.spOutboundTag.selectedItemPosition
++        if (selectedOutboundPosition == CUSTOM_OUTBOUND_INDEX) {
++            // Custom selected - use the custom outbound tag value
++            rulesetItem.outboundTag = binding.etCustomOutboundTag.text.toString().trim()
++            rulesetItem.customOutboundTag = rulesetItem.outboundTag
++        } else {
++            rulesetItem.outboundTag = outbound_tag[selectedOutboundPosition]
++            rulesetItem.customOutboundTag = null
++        }
+         rulesetItem.domain = binding.etDomain.text.toString().split(",").map { it.trim() }.filter { it.isNotEmpty() }
+         rulesetItem.ip = binding.etIp.text.toString().split(",").map { it.trim() }.filter { it.isNotEmpty() }
+         rulesetItem.port = binding.etPort.text.toString().nullIfBlank()
+
+diff --git a/V2rayNG/app/src/main/java/com/v2ray/ang/handler/V2rayConfigManager.kt b/V2rayNG/app/src/main/java/com/v2ray/ang/handler/V2rayConfigManager.kt
+index 8eca5fe..1234567 100644
+--- a/V2rayNG/app/src/main/java/com/v2ray/ang/handler/V2rayConfigManager.kt
++++ b/V2rayNG/app/src/main/java/com/v2ray/ang/handler/V2rayConfigManager.kt
+@@ -550,6 +550,9 @@ object V2rayConfigManager {
+         val rulesetItems = MmkvManager.decodeRoutingRulesets()
+         rulesetItems?.forEach { key ->
+             if (key.enabled && key.outboundTag == tag && !key.domain.isNullOrEmpty()) {
++                // Skip custom outbounds - they should not be treated as standard tags
++                if (isCustomOutboundTag(key.outboundTag)) return@forEach
++
+                 key.domain?.forEach {
+                     if (it != AppConfig.GEOSITE_PRIVATE && (it.startsWith("geosite:") || it.startsWith("domain:"))) {
+                         domain.add(it)
+@@ -561,6 +564,17 @@ object V2rayConfigManager {
+         return domain
+     }
+ 
++    /**
++     * Checks if an outbound tag is a custom (user-defined) outbound.
++     * Custom outbounds are those that don't match the standard tags (proxy, direct, block).
++     *
++     * @param tag The outbound tag to check
++     * @return true if the tag is custom, false otherwise
++     */
++    private fun isCustomOutboundTag(tag: String): Boolean {
++        return tag != AppConfig.TAG_PROXY && tag != AppConfig.TAG_DIRECT && tag != AppConfig.TAG_BLOCKED
++    }
++
+     /**
+      * Configures custom local DNS settings.
+      *
+@@ -722,6 +736,52 @@ object V2rayConfigManager {
+         return true
+     }
+ 
++    /**
++     * Configures a custom outbound with chain proxy support.
++     * This is used when a routing rule specifies a custom outbound tag.
++     *
++     * @param v2rayConfig The V2ray configuration object to be modified
++     * @param customOutboundTag The custom outbound tag (usually a profile/group name)
++     * @return true if the custom outbound was configured successfully, false otherwise
++     */
++    private fun configureCustomOutbound(v2rayConfig: V2rayConfig, customOutboundTag: String): Boolean {
++        try {
++            // Try to find the profile/group by remarks (name)
++            val profile = SettingsManager.getServerViaRemarks(customOutboundTag)
++                ?: return false
++
++            // Check if it's a policy group
++            if (profile.configType == EConfigType.POLICYGROUP) {
++                // Handle policy group with potential chain proxy
++                return addGroupOutboundsWithChain(v2rayConfig, profile)
++            } else {
++                // Single profile - convert to outbound
++                val outbound = convertProfile2Outbound(profile) ?: return false
++                val ret = updateOutboundWithGlobalSettings(outbound)
++                if (!ret) return false
++
++                // Set the custom tag
++                outbound.tag = customOutboundTag
++
++                // Add to outbounds if not already present
++                if (v2rayConfig.outbounds.none { it.tag == customOutboundTag }) {
++                    v2rayConfig.outbounds.add(outbound)
++                }
++
++                // Check for chain proxy in subscription
++                if (!profile.subscriptionId.isNullOrEmpty()) {
++                    setupChainProxyForOutbound(v2rayConfig, outbound, profile.subscriptionId)
++                }
++
++                return true
++            }
++        } catch (e: Exception) {
++            Log.e(AppConfig.TAG, "Failed to configure custom outbound: $customOutboundTag", e)
++            return false
++        }
++    }
++
+     /**
+      * Updates outbound settings based on global preferences.
+      *
+@@ -1000,6 +1060,48 @@ object V2rayConfigManager {
+         return true
+     }
+ 
++    /**
++     * Sets up chain proxy (prev/next) for a custom outbound.
++     *
++     * @param v2rayConfig The V2ray configuration object to be modified
++     * @param outbound The outbound to setup chain proxy for
++     * @param subscriptionId The subscription ID to look up chain settings
++     */
++    private fun setupChainProxyForOutbound(v2rayConfig: V2rayConfig, outbound: OutboundBean, subscriptionId: String) {
++        if (subscriptionId.isEmpty()) return
++
++        try {
++            val subItem = MmkvManager.decodeSubscription(subscriptionId) ?: return
++
++            // Previous proxy
++            val prevNode = SettingsManager.getServerViaRemarks(subItem.prevProfile)
++            if (prevNode != null) {
++                val prevOutbound = convertProfile2Outbound(prevNode)
++                if (prevOutbound != null) {
++                    updateOutboundWithGlobalSettings(prevOutbound)
++                    prevOutbound.tag = "${outbound.tag}-prev"
++                    v2rayConfig.outbounds.add(prevOutbound)
++                    outbound.ensureSockopt().dialerProxy = prevOutbound.tag
++                }
++            }
++
++            // Next proxy
++            val nextNode = SettingsManager.getServerViaRemarks(subItem.nextProfile)
++            if (nextNode != null) {
++                val nextOutbound = convertProfile2Outbound(nextNode)
++                if (nextOutbound != null) {
++                    updateOutboundWithGlobalSettings(nextOutbound)
++                    nextOutbound.tag = "${outbound.tag}-next"
++                    v2rayConfig.outbounds.add(0, nextOutbound)
++                    val originalTag = outbound.tag
++                    outbound.tag = "${originalTag}-orig"
++                    nextOutbound.ensureSockopt().dialerProxy = outbound.tag
++                }
++            }
++        } catch (e: Exception) {
++            Log.e(AppConfig.TAG, "Failed to setup chain proxy for outbound: ${outbound.tag}", e)
++        }
++    }
++
+     /**
+      * Resolves domain names to IP addresses in outbound connections.
+      *
+@@ -1100,15 +1202,15 @@ object V2rayConfigManager {
+      * @param v2rayConfig The V2ray configuration object to be modified
+      */
+     private fun getRouting(v2rayConfig: V2rayConfig) {
+-        val rulesetItems = MmkvManager.decodeRoutingRulesets()
+-        rulesetItems?.forEach { key ->
+-            if (key.enabled) {
+-                val rulesBean = RulesBean()
+-                rulesBean.outboundTag = key.outboundTag
+-                // Tag for routing rules
+-                if (key.outboundTag == AppConfig.TAG_PROXY) {
+-                    rulesBean.outboundTag = TAG_PROXY
+-                } else if (key.outboundTag == AppConfig.TAG_DIRECT) {
+-                    rulesBean.outboundTag = AppConfig.TAG_DIRECT
+-                } else if (key.outboundTag == AppConfig.TAG_BLOCKED) {
+-                    rulesBean.outboundTag = AppConfig.TAG_BLOCKED
++        try {
++            val rulesetItems = MmkvManager.decodeRoutingRulesets()
++            val customOutbounds = mutableSetOf<String>()
++
++            rulesetItems?.forEach { key ->
++                if (!key.enabled) return@forEach
++
++                val rulesBean = RulesBean()
++
++                // Handle outbound tag - support custom outbounds
++                when {
++                    key.outboundTag == AppConfig.TAG_PROXY -> {
++                        rulesBean.outboundTag = TAG_PROXY
++                    }
++                    key.outboundTag == AppConfig.TAG_DIRECT -> {
++                        rulesBean.outboundTag = AppConfig.TAG_DIRECT
++                    }
++                    key.outboundTag == AppConfig.TAG_BLOCKED -> {
++                        rulesBean.outboundTag = AppConfig.TAG_BLOCKED
++                    }
++                    isCustomOutboundTag(key.outboundTag) -> {
++                        // Custom outbound - use the tag as-is and track for later setup
++                        rulesBean.outboundTag = key.outboundTag
++                        customOutbounds.add(key.outboundTag)
++                    }
++                    else -> {
++                        // Fallback - use the tag directly
++                        rulesBean.outboundTag = key.outboundTag
++                    }
+                 }
+ 
+                 // Domain rules
+@@ -1160,6 +1262,14 @@ object V2rayConfigManager {
+                 v2rayConfig.routing.rules.add(rulesBean)
+             }
+         }
++
++            // Configure custom outbounds after processing all rules
++            customOutbounds.forEach { customTag ->
++                configureCustomOutbound(v2rayConfig, customTag)
++            }
++
++        } catch (e: Exception) {
++            Log.e(AppConfig.TAG, "Failed to configure routing", e)
++        }
+     }
+ 
+     /**
+-- 
+2.34.1

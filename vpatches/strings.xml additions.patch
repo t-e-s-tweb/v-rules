@@ -1,0 +1,24 @@
+From: Assistant <assistant@example.com>
+Date: Wed, 11 Feb 2026 00:00:05 +0000
+Subject: [PATCH] Add string resources for custom outbound feature
+
+---
+ .../app/src/main/res/values/strings.xml       | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/V2rayNG/app/src/main/res/values/strings.xml b/V2rayNG/app/src/main/res/values/strings.xml
+index 1234567..abcdefg 100644
+--- a/V2rayNG/app/src/main/res/values/strings.xml
++++ b/V2rayNG/app/src/main/res/values/strings.xml
+@@ -150,6 +150,9 @@
+     <string name="routing_settings_port">Port</string>
+     <string name="routing_settings_protocol">Protocol</string>
+     <string name="routing_settings_network">Network</string>
++    <string name="routing_settings_custom_outbound_tag">Custom Outbound Tag</string>
++    <string name="routing_settings_custom_outbound_hint">Enter outbound/group name</string>
++    <string name="routing_settings_outbound_custom">Custom</string>
+ 
+     <string name="connection_test_pending">Check Connection</string>
+     <string name="connection_test_testing">Testing…</string>
+-- 
+2.34.1
