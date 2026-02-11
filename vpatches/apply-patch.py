@@ -231,19 +231,24 @@ def modify_v2ray_config_manager():
         print("  ✓ Custom outbound methods already present – skipping")
         return True
 
-    # ---- 1. Add check in getUserRule2Domain ----
-    content = content.replace(
-        '        if (key.enabled && key.outboundTag == tag && !key.domain.isNullOrEmpty()) {',
-        '''        if (key.enabled && key.outboundTag == tag && !key.domain.isNullOrEmpty()) {
+    # ------------------------------------------------------------------
+    # 1. Insert check in getUserRule2Domain
+    # ------------------------------------------------------------------
+    pattern1 = r'(        if \(key\.enabled && key\.outboundTag == tag && !key\.domain\.isNullOrEmpty\(\) \{)'
+    replacement1 = r'''\1
                 // Skip custom outbounds - they should not be treated as standard tags
                 if (isCustomOutboundTag(key.outboundTag)) return@forEach'''
-    )
+    content, n1 = re.subn(pattern1, replacement1, content, flags=re.MULTILINE)
+    if n1 == 0:
+        print("  ✗ Failed to patch getUserRule2Domain (pattern not found)")
+        return False
 
-    # ---- 2. Add isCustomOutboundTag method ----
-    content = content.replace(
-        '        return domain\n    }\n\n    /**',
-        '''        return domain
-    }
+    # ------------------------------------------------------------------
+    # 2. Insert isCustomOutboundTag after getUserRule2Domain
+    #    Anchor: the line "        return domain" + the closing brace + blank line + "/**"
+    # ------------------------------------------------------------------
+    pattern2 = r'(        return domain\n    }\n\n    /\*\*)'
+    is_custom_method = r'''\1
 
     /**
      * Checks if an outbound tag is a custom (user-defined) outbound.
@@ -257,18 +262,17 @@ def modify_v2ray_config_manager():
     }
 
     /**'''
-    )
+    content, n2 = re.subn(pattern2, is_custom_method, content, flags=re.MULTILINE)
+    if n2 == 0:
+        print("  ✗ Failed to insert isCustomOutboundTag (pattern not found)")
+        return False
 
-    # ---- 3. Insert configureCustomOutbound + setupChainProxyForOutbound together ----
-    # Replace the exact end of updateOutboundFragment
-    old_block = '''        updateOutboundFragment(v2rayConfig)
-        return true
-    }
-
-    /**'''
-    new_block = '''        updateOutboundFragment(v2rayConfig)
-        return true
-    }
+    # ------------------------------------------------------------------
+    # 3. Insert configureCustomOutbound + setupChainProxyForOutbound
+    #    Anchor: the end of getOutbounds (updateOutboundFragment + return true + closing brace + blank line + "/**")
+    # ------------------------------------------------------------------
+    pattern3 = r'(        updateOutboundFragment\(v2rayConfig\)\n        return true\n    }\n\n    /\*\*)'
+    custom_methods_block = r'''\1
 
     /**
      * Configures a custom outbound with chain proxy support.
@@ -359,12 +363,16 @@ def modify_v2ray_config_manager():
     }
 
     /**'''
-    content = content.replace(old_block, new_block)
+    content, n3 = re.subn(pattern3, custom_methods_block, content, flags=re.MULTILINE)
+    if n3 == 0:
+        print("  ✗ Failed to insert custom outbound methods (pattern not found)")
+        return False
 
-    # ---- 4. Modify getRouting ----
-    content = content.replace(
-        '            val rulesetItems = MmkvManager.decodeRoutingRulesets()\n            rulesetItems?.forEach { key ->\n                getRoutingUserRule(key, v2rayConfig)',
-        '''            val rulesetItems = MmkvManager.decodeRoutingRulesets()
+    # ------------------------------------------------------------------
+    # 4. Modify getRouting – add custom outbound tracking and configuration
+    # ------------------------------------------------------------------
+    pattern4 = r'(            val rulesetItems = MmkvManager\.decodeRoutingRulesets\(\)\n            rulesetItems\?\.forEach \{ key ->\n                getRoutingUserRule\(key, v2rayConfig\))'
+    replacement4 = r'''            val rulesetItems = MmkvManager.decodeRoutingRulesets()
             val customOutbounds = mutableSetOf<String>()
             rulesetItems?.forEach { key ->
                 // Track custom outbounds for later setup
@@ -378,7 +386,10 @@ def modify_v2ray_config_manager():
             customOutbounds.forEach { customTag ->
                 configureCustomOutbound(v2rayConfig, customTag)
             }'''
-    )
+    content, n4 = re.subn(pattern4, replacement4, content, flags=re.MULTILINE)
+    if n4 == 0:
+        print("  ✗ Failed to patch getRouting (pattern not found)")
+        return False
 
     with open(filepath, 'w') as f:
         f.write(content)
