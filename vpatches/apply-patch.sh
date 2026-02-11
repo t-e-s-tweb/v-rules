@@ -34,7 +34,7 @@ echo ""
 # Apply the main patch
 echo "Applying custom outbound routing patch..."
 if git apply --check "$SCRIPT_DIR/custom-outbound-routing.patch" 2>/dev/null; then
-    git apply "$SCRIPT_DIR/custom-outbound-routing.patch"
+    git apply "$SCRIPT_DIR/custom-outbound-routing.patch" --ignore-whitespace
     echo "✓ Main patch applied successfully"
 else
     echo "⚠ Patch may have already been applied or there are conflicts"
