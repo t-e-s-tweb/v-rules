@@ -76,7 +76,6 @@ index 1a86312..1234567 100644
 +                    android:inputType="text"
 +                    android:hint="@string/routing_settings_custom_outbound_hint" />
 +            </LinearLayout>
-
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
