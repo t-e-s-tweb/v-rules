@@ -105,26 +105,19 @@ def modify_strings_xml():
     with open(filepath, 'r', encoding='utf-8') as f:
         content = f.read()
 
-    # Check if resources already exist
-    if 'name="routing_settings_custom_outbound_tag"' in content:
-        print("  ✓ String 'routing_settings_custom_outbound_tag' already present")
-    if 'name="routing_settings_custom_outbound_hint"' in content:
-        print("  ✓ String 'routing_settings_custom_outbound_hint' already present")
-    if 'name="routing_settings_custom_outbound_tag"' in content and 'name="routing_settings_custom_outbound_hint"' in content:
+    if 'name="routing_settings_custom_outbound_tag"' in content and \
+       'name="routing_settings_custom_outbound_hint"' in content:
+        print("  ✓ String resources already present")
         return True
 
-    # Find the closing </resources> tag
     close_tag_pattern = r'(\s*)</resources>'
     match = re.search(close_tag_pattern, content, re.IGNORECASE)
     if not match:
         print("  ✗ Could not find </resources> tag")
         return False
 
-    # Use 4 spaces indentation to match existing resources
     indent = "    "
     insertion_point = match.start()
-
-    # Build the new string resources block
     new_strings = f'''
 {indent}<string name="routing_settings_custom_outbound_tag">Custom outbound tag</string>
 {indent}<string name="routing_settings_custom_outbound_hint">Enter profile/group remark</string>
@@ -260,7 +253,7 @@ def modify_v2ray_config_manager():
     /**'''
     )
 
-    # ---- 3. Add configureCustomOutbound method ----
+    # ---- 3. Add configureCustomOutbound method (FIXED: no undefined function) ----
     content = content.replace(
         '        updateOutboundFragment(v2rayConfig)\n        return true\n    }\n\n    /**',
         '''        updateOutboundFragment(v2rayConfig)
@@ -281,31 +274,31 @@ def modify_v2ray_config_manager():
             val profile = SettingsManager.getServerViaRemarks(customOutboundTag)
                 ?: return false
 
-            // Check if it's a policy group
+            // Policy groups are NOT supported as custom outbound tags
             if (profile.configType == EConfigType.POLICYGROUP) {
-                // Handle policy group with potential chain proxy
-                return addGroupOutboundsWithChain(v2rayConfig, profile)
-            } else {
-                // Single profile - convert to outbound
-                val outbound = convertProfile2Outbound(profile) ?: return false
-                val ret = updateOutboundWithGlobalSettings(outbound)
-                if (!ret) return false
-
-                // Set the custom tag
-                outbound.tag = customOutboundTag
-
-                // Add to outbounds if not already present
-                if (v2rayConfig.outbounds.none { it.tag == customOutboundTag }) {
-                    v2rayConfig.outbounds.add(outbound)
-                }
-
-                // Check for chain proxy in subscription
-                if (!profile.subscriptionId.isNullOrEmpty()) {
-                    setupChainProxyForOutbound(v2rayConfig, outbound, profile.subscriptionId)
-                }
-
-                return true
+                Log.d(AppConfig.TAG, "Policy group cannot be used as custom outbound tag: $customOutboundTag")
+                return false
             }
+
+            // Single profile - convert to outbound
+            val outbound = convertProfile2Outbound(profile) ?: return false
+            val ret = updateOutboundWithGlobalSettings(outbound)
+            if (!ret) return false
+
+            // Set the custom tag
+            outbound.tag = customOutboundTag
+
+            // Add to outbounds if not already present
+            if (v2rayConfig.outbounds.none { it.tag == customOutboundTag }) {
+                v2rayConfig.outbounds.add(outbound)
+            }
+
+            // Check for chain proxy in subscription
+            if (!profile.subscriptionId.isNullOrEmpty()) {
+                setupChainProxyForOutbound(v2rayConfig, outbound, profile.subscriptionId)
+            }
+
+            return true
         } catch (e: Exception) {
             Log.e(AppConfig.TAG, "Failed to configure custom outbound: $customOutboundTag", e)
             return false
@@ -386,6 +379,11 @@ def modify_v2ray_config_manager():
             }'''
     )
 
+    # ---- Final sanity check: ensure createInitOutbound still exists ----
+    if "fun createInitOutbound" not in content:
+        print("  ✗ CRITICAL: createInitOutbound function missing after patch!")
+        return False
+
     with open(filepath, 'w') as f:
         f.write(content)
     print("  ✓ Added custom outbound support to V2rayConfigManager")
@@ -395,14 +393,14 @@ def main():
     print("=" * 70)
     print("Custom Outbound Support - Direct File Modification")
     print("=" * 70)
-    print("\n⚠️  This script modifies files directly – no backups are created.")
+    print("\n⚠️  This script modifies files directly – no backups are created.\n")
 
     results = []
     for func, name in [
         (modify_ruleset_item, "RulesetItem.kt"),
         (modify_arrays_xml, "arrays.xml"),
         (modify_layout, "activity_routing_edit.xml"),
-        (modify_strings_xml, "strings.xml"),          # added!
+        (modify_strings_xml, "strings.xml"),
         (modify_routing_edit_activity, "RoutingEditActivity.kt"),
         (modify_v2ray_config_manager, "V2rayConfigManager.kt"),
     ]:
@@ -423,8 +421,8 @@ def main():
     print(f"\nSuccessfully modified {success_count}/{len(results)} files")
     if success_count == len(results):
         print("\n✅ All files modified successfully!")
-        print("   The two required string resources have been inserted into strings.xml.")
-        print("\nYou can now rebuild the project – no manual steps remain.")
+        print("   The custom outbound feature is now ready.")
+        print("\nYou can rebuild the project – no manual steps remain.")
     else:
         print("\n❌ Some files failed to modify.")
         print("   Check the error messages above and manually apply the changes.")
