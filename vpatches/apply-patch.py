@@ -237,20 +237,16 @@ def modify_routing_edit_activity():
 
     # ---- 6. Add spinner listener INSIDE onCreate (before the final '}') ----
     if "binding.spOutboundTag.onItemSelectedListener" not in content:
-        # Find the position of the last '}' that closes onCreate
-        # We'll locate the function signature and then find the matching closing brace
-        # Simpler: find the last '}\n    }' (closes else and then method)
-        # Use regex that captures whitespace flexibly
+        # Find the last occurrence of "}\n    }" which closes the else and then the method
         pattern = r'(\s*)\}\n(\s*)\}'
-        # We need to ensure we only replace the very last occurrence
         matches = list(re.finditer(pattern, content))
         if matches:
             last_match = matches[-1]
             start, end = last_match.span()
             indent1 = last_match.group(1)
             indent2 = last_match.group(2)
-            # Keep the original closing braces, but insert listener before them
-            listener = f'''{indent1}}
+            # FIXED: double curly braces inside f-string
+            listener = f'''{indent1}}}
 
         // Setup listener for outbound tag spinner
         binding.spOutboundTag.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {{
@@ -286,7 +282,6 @@ def modify_v2ray_config_manager():
     # ------------------------------------------------------------------
     # 1. Add skip check in getUserRule2Domain
     # ------------------------------------------------------------------
-    # Use flexible whitespace pattern
     pattern1 = r'(        if \(key\.enabled && key\.outboundTag == tag && !key\.domain\.isNullOrEmpty\(\) \{)'
     replacement1 = r'''\1
                 // Skip custom outbounds - they should not be treated as standard tags
