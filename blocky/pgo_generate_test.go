@@ -1,7 +1,7 @@
 package main
 
-// pgo_generate_test.go — perfect PGO profile for current blocky (main branch, Feb 2026)
-// All fields & constructors match the live code exactly.
+// pgo_generate_test.go — perfect PGO profile for your current blocky (master)
+// Drop in repo root next to main.go
 
 import (
 	"context"
@@ -77,11 +77,8 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 		Upstreams: config.Upstreams{
 			Groups: config.UpstreamGroups{"default": {u}},
 		},
-		Blocking: config.Blocking{
-			Enable: true,
-		},
+		Blocking: config.Blocking{}, // no Enable field in current version
 		Caching: config.Caching{
-			Enable:         true,
 			MinCachingTime: config.Duration(60 * time.Second),
 		},
 		QueryLog: config.QueryLog{
@@ -131,7 +128,7 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 func BenchmarkPGOWorkload_HTTP_DoH_API(b *testing.B) {
 	cfg := &config.Config{
 		Ports: config.Ports{
-			HTTP: []string{":0"},
+			HTTP: []string{"127.0.0.1:8080"}, // fixed port so the HTTP calls actually hit the server
 		},
 		Upstreams: config.Upstreams{
 			Groups: config.UpstreamGroups{"default": {mustParseUpstream("udp://1.1.1.1:53")}},
@@ -150,13 +147,13 @@ func BenchmarkPGOWorkload_HTTP_DoH_API(b *testing.B) {
 
 	errCh := make(chan error, 1)
 	go srv.Start(ctx, errCh)
-	time.Sleep(400 * time.Millisecond) // give HTTP router time to start
+	time.Sleep(400 * time.Millisecond)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		http.Get("http://127.0.0.1:0/dns-query?dns=AAABAAABAAAAAAAAA2RuczNjb20AAQAB")
-		http.Get("http://127.0.0.1:0/api/stats")
+		http.Get("http://127.0.0.1:8080/dns-query?dns=AAABAAABAAAAAAAAA2RuczNjb20AAQAB")
+		http.Get("http://127.0.0.1:8080/api/stats")
 	}
 }
 
