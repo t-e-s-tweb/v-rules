@@ -1,7 +1,6 @@
 package main
 
-// pgo_generate_test.go — perfect PGO profile for your current blocky (master)
-// Drop in repo root next to main.go
+// pgo_generate_test.go — perfect PGO profile for blocky (master, Feb 2026)
 
 import (
 	"context"
@@ -77,7 +76,11 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 		Upstreams: config.Upstreams{
 			Groups: config.UpstreamGroups{"default": {u}},
 		},
-		Blocking: config.Blocking{}, // no Enable field in current version
+		Blocking: config.Blocking{
+			Denylists: map[string][]config.BytesSource{
+				"ads": {config.TextBytesSource("||ads.example.com^"), config.TextBytesSource("||tracker.net^")},
+			},
+		},
 		Caching: config.Caching{
 			MinCachingTime: config.Duration(60 * time.Second),
 		},
@@ -85,13 +88,24 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 			Type: config.QueryLogTypeNone,
 		},
 		Prometheus: config.Metrics{Enable: false},
+		BootstrapDNS: config.Upstream{
+			Net:  "udp",
+			Host: "8.8.8.8",
+			Port: 53,
+		}, // silences bootstrap warning (fake, but bench doesn't hit network)
 	}
 
 	ctx := context.Background()
 	bootstrap, _ := resolver.NewBootstrap(ctx, cfg)
 
 	upstreamTree, _ := resolver.NewUpstreamTreeResolver(ctx, cfg.Upstreams, bootstrap)
-	blocking, _ := resolver.NewBlockingResolver(ctx, cfg.Blocking, nil, bootstrap)
+	blocking, err := resolver.NewBlockingResolver(ctx, cfg.Blocking, nil, bootstrap)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if blocking == nil {
+		b.Fatal("blocking resolver is nil")
+	}
 	caching, _ := resolver.NewCachingResolver(ctx, cfg.Caching, nil)
 
 	r := resolver.Chain(
@@ -128,7 +142,7 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 func BenchmarkPGOWorkload_HTTP_DoH_API(b *testing.B) {
 	cfg := &config.Config{
 		Ports: config.Ports{
-			HTTP: []string{"127.0.0.1:8080"}, // fixed port so the HTTP calls actually hit the server
+			HTTP: []string{":0"},
 		},
 		Upstreams: config.Upstreams{
 			Groups: config.UpstreamGroups{"default": {mustParseUpstream("udp://1.1.1.1:53")}},
@@ -149,11 +163,18 @@ func BenchmarkPGOWorkload_HTTP_DoH_API(b *testing.B) {
 	go srv.Start(ctx, errCh)
 	time.Sleep(400 * time.Millisecond)
 
+	// Get actual bound HTTP address (since :0 is random port)
+	if len(srv.HTTPListeners) == 0 {
+		b.Fatal("no HTTP listener")
+	}
+	httpAddr := srv.HTTPListeners[0].Addr().String()
+	baseURL := "http://" + httpAddr
+
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		http.Get("http://127.0.0.1:8080/dns-query?dns=AAABAAABAAAAAAAAA2RuczNjb20AAQAB")
-		http.Get("http://127.0.0.1:8080/api/stats")
+		http.Get(baseURL + "/dns-query?dns=AAABAAABAAAAAAAAA2RuczNjb20AAQAB")
+		http.Get(baseURL + "/api/stats")
 	}
 }
 
