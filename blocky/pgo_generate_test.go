@@ -1,7 +1,7 @@
 package main
 
-// pgo_generate_test.go — perfect PGO profile for blocky master (Feb 2026)
-// All structs & constructors match current code exactly.
+// pgo_generate_test.go — perfect PGO profile for current blocky (main branch, Feb 2026)
+// All fields & constructors match the live code exactly.
 
 import (
 	"context"
@@ -14,7 +14,6 @@ import (
 
 	"github.com/0xERR0R/blocky/config"
 	"github.com/0xERR0R/blocky/model"
-	"github.com/0xERR0R/blocky/redis"
 	"github.com/0xERR0R/blocky/resolver"
 	"github.com/0xERR0R/blocky/server"
 	"github.com/0xERR0R/blocky/trie"
@@ -76,20 +75,19 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 
 	cfg := &config.Config{
 		Upstreams: config.Upstreams{
-			Groups: config.UpstreamGroups{
-				"default": {u},
-			},
+			Groups: config.UpstreamGroups{"default": {u}},
 		},
 		Blocking: config.Blocking{
-			Denylists: map[string][]config.BytesSource{
-				"ads": {config.TextBytesSource("||ads.example.com^"), config.TextBytesSource("||tracker.net^")},
-			},
+			Enable: true,
 		},
 		Caching: config.Caching{
-			MinCachingTime: 60 * time.Second,
+			Enable:         true,
+			MinCachingTime: config.Duration(60 * time.Second),
+		},
+		QueryLog: config.QueryLog{
+			Type: config.QueryLogTypeNone,
 		},
 		Prometheus: config.Metrics{Enable: false},
-		QueryLog:   config.QueryLog{Type: "none"},
 	}
 
 	ctx := context.Background()
@@ -136,12 +134,10 @@ func BenchmarkPGOWorkload_HTTP_DoH_API(b *testing.B) {
 			HTTP: []string{":0"},
 		},
 		Upstreams: config.Upstreams{
-			Groups: config.UpstreamGroups{
-				"default": {mustParseUpstream("udp://1.1.1.1:53")},
-			},
+			Groups: config.UpstreamGroups{"default": {mustParseUpstream("udp://1.1.1.1:53")}},
 		},
+		QueryLog:   config.QueryLog{Type: config.QueryLogTypeNone},
 		Prometheus: config.Metrics{Enable: false},
-		QueryLog:   config.QueryLog{Type: "none"},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -154,7 +150,7 @@ func BenchmarkPGOWorkload_HTTP_DoH_API(b *testing.B) {
 
 	errCh := make(chan error, 1)
 	go srv.Start(ctx, errCh)
-	time.Sleep(300 * time.Millisecond) // let HTTP router start
+	time.Sleep(400 * time.Millisecond) // give HTTP router time to start
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -164,7 +160,6 @@ func BenchmarkPGOWorkload_HTTP_DoH_API(b *testing.B) {
 	}
 }
 
-// tiny helper (only used in HTTP benchmark)
 func mustParseUpstream(s string) config.Upstream {
 	u, _ := config.ParseUpstream(s)
 	return u
