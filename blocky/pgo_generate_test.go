@@ -88,11 +88,13 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 			Type: config.QueryLogTypeNone,
 		},
 		Prometheus: config.Metrics{Enable: false},
-		BootstrapDNS: config.Upstream{
-			Net:  "udp",
-			Host: "8.8.8.8",
-			Port: 53,
-		}, // silences bootstrap warning (fake, but bench doesn't hit network)
+		BootstrapDNS: []config.BootstrapDNS{
+			{Upstream: config.Upstream{
+				Net:  config.NetProtocol("tcp+udp"),
+				Host: "8.8.8.8",
+				Port: 53,
+			}},
+		},
 	}
 
 	ctx := context.Background()
@@ -142,7 +144,7 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 func BenchmarkPGOWorkload_HTTP_DoH_API(b *testing.B) {
 	cfg := &config.Config{
 		Ports: config.Ports{
-			HTTP: []string{":0"},
+			HTTP: []string{"127.0.0.1:4000"},
 		},
 		Upstreams: config.Upstreams{
 			Groups: config.UpstreamGroups{"default": {mustParseUpstream("udp://1.1.1.1:53")}},
@@ -163,12 +165,7 @@ func BenchmarkPGOWorkload_HTTP_DoH_API(b *testing.B) {
 	go srv.Start(ctx, errCh)
 	time.Sleep(400 * time.Millisecond)
 
-	// Get actual bound HTTP address (since :0 is random port)
-	if len(srv.HTTPListeners) == 0 {
-		b.Fatal("no HTTP listener")
-	}
-	httpAddr := srv.HTTPListeners[0].Addr().String()
-	baseURL := "http://" + httpAddr
+	baseURL := "http://127.0.0.1:4000"
 
 	b.ResetTimer()
 	b.ReportAllocs()
