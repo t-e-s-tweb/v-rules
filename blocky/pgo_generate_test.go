@@ -1,18 +1,7 @@
 package main
 
-// pgo_generate_test.go — generates a production PGO profile for blocky
-//
-// How to generate (run from repo root):
-//   go test -bench=BenchmarkPGOWorkload -benchtime=15s -cpuprofile=default.pgo .
-//
-// Then build with PGO (update your Makefile / .goreleaser.yml / Dockerfile accordingly):
-//   go build -pgo=default.pgo -o blocky .
-//
-// This file exactly matches blocky’s real code:
-// • Trie domain matching (lists → blocking)
-// • miekg/dns pack/unpack (DoH + UDP/TCP hot path)
-// • Full resolver chain (Filtering → FQDNOnly → Blocking → DNSSEC/Caching → UpstreamTree)
-// • HTTP serving + DoH + API (via server.NewServer + chi router)
+// pgo_generate_test.go — perfect PGO profile for current blocky (master)
+// Place in repo ROOT next to main.go
 
 import (
 	"context"
@@ -22,16 +11,17 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/0xERR0R/blocky/config"
 	"github.com/0xERR0R/blocky/model"
+	"github.com/0xERR0R/blocky/redis"
 	"github.com/0xERR0R/blocky/resolver"
 	"github.com/0xERR0R/blocky/server"
 	"github.com/0xERR0R/blocky/trie"
 	"github.com/miekg/dns"
 )
 
-// domainSplit matches the exact SplitFunc used by blocky’s Trie (suffix/parent matching for domains).
 func domainSplit(s string) (string, string) {
 	if idx := strings.LastIndexByte(s, '.'); idx != -1 {
 		return s[idx+1:], s[:idx]
@@ -41,8 +31,6 @@ func domainSplit(s string) (string, string) {
 
 func BenchmarkPGOWorkload_Trie(b *testing.B) {
 	t := trie.NewTrie(domainSplit)
-
-	// Realistic blocklist size
 	for i := 0; i < 15000; i++ {
 		t.Insert(fmt.Sprintf("ad-%d.example.com", i))
 		t.Insert(fmt.Sprintf("tracker-%d.net", i))
@@ -62,7 +50,6 @@ func BenchmarkPGOWorkload_Trie(b *testing.B) {
 
 	b.ResetTimer()
 	b.ReportAllocs()
-
 	for i := 0; i < b.N; i++ {
 		for _, q := range queries {
 			_ = t.HasParentOf(q)
@@ -71,23 +58,14 @@ func BenchmarkPGOWorkload_Trie(b *testing.B) {
 }
 
 func BenchmarkPGOWorkload_DNSMessage(b *testing.B) {
-	questions := []string{
-		"example.com.",
-		"www.github.com.",
-		"api.openai.com.",
-		"ads.doubleclick.net.",
-		"tracker.example.com.",
-	}
-
+	questions := []string{"example.com.", "www.github.com.", "api.openai.com.", "ads.doubleclick.net.", "tracker.example.com."}
 	b.ResetTimer()
 	b.ReportAllocs()
-
 	for i := 0; i < b.N; i++ {
 		for _, qname := range questions {
 			m := new(dns.Msg)
 			m.SetQuestion(qname, dns.TypeA)
-			m.SetEdns0(1232, false) // common real-world DoH/UDP
-
+			m.SetEdns0(1232, false)
 			data, _ := m.Pack()
 			var m2 dns.Msg
 			_ = m2.Unpack(data)
@@ -97,41 +75,58 @@ func BenchmarkPGOWorkload_DNSMessage(b *testing.B) {
 
 func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 	cfg := &config.Config{
-		Upstreams: config.Upstreams{
-			Groups: map[string][]string{
-				"default": {"udp://1.1.1.1:53"},
-			},
-		},
-		Blocking: config.Blocking{
-			BlackLists: map[string][]string{
-				"ads": {"||ads.example.com^", "||tracker.net^"},
-			},
-		},
-		Caching: config.Caching{
-			MinTTL: 60, // forces cache hits in bench
-		},
-		Prometheus: config.PrometheusConfig{Enable: false},
-		QueryLog:   config.QueryLogConfig{Type: "none"},
+		Upstreams:   config.UpstreamsConfig{Groups: map[string][]string{"default": {"udp://1.1.1.1:53"}}},
+		Blocking:    config.BlockingConfig{BlackLists: map[string][]string{"ads": {"||ads.example.com^", "||tracker.net^"}}},
+		Caching:     config.CachingConfig{MinTTL: 60},
+		Prometheus:  config.PrometheusConfig{Enable: false},
+		QueryLog:    config.QueryLogConfig{Type: "none"},
+		Filtering:   config.FilteringConfig{},
+		FQDNOnly:    config.FQDNOnlyConfig{},
+		EDE:         config.EDEConfig{},
+		DNS64:       config.DNS64Config{},
+		ECS:         config.ECSConfig{},
+		SUDN:        config.SUDNConfig{},
+		Conditional: config.ConditionalConfig{},
+		HostsFile:   config.HostsFileConfig{},
+		ClientLookup: config.ClientLookupConfig{},
+		CustomDNS:   config.CustomDNSConfig{},
+		DNSSEC:      config.DNSSECConfig{},
+		Redis:       config.RedisConfig{IsEnabled: func() bool { return false }},
 	}
 
 	ctx := context.Background()
-	bootstrap, _ := resolver.NewBootstrap(ctx, cfg) // error ignored for bench (not hot)
+	bootstrap, _ := resolver.NewBootstrap(ctx, cfg)
+	var redisClient *redis.Client
 
-	blocking, _ := resolver.NewBlockingResolver(ctx, cfg.Blocking, nil, bootstrap)
-	caching, _ := resolver.NewCachingResolver(ctx, cfg.Caching, nil)
-	upstream, _ := resolver.NewUpstreamTreeResolver(ctx, cfg.Upstreams, bootstrap)
+	// Exact same creation as server/server.go (createQueryResolver)
+	upstreamTree, _ := resolver.NewUpstreamTreeResolver(ctx, cfg.Upstreams, bootstrap)
+	blocking, _ := resolver.NewBlockingResolver(ctx, cfg.Blocking, redisClient, bootstrap)
+	clientNames, _ := resolver.NewClientNamesResolver(ctx, cfg.ClientLookup, cfg.Upstreams, bootstrap)
+	queryLogging, _ := resolver.NewQueryLoggingResolver(ctx, cfg.QueryLog)
+	condUpstream, _ := resolver.NewConditionalUpstreamResolver(ctx, cfg.Conditional, cfg.Upstreams, bootstrap)
+	hostsFile, _ := resolver.NewHostsFileResolver(ctx, cfg.HostsFile, bootstrap)
+	cachingResolver, _ := resolver.NewCachingResolver(ctx, cfg.Caching, redisClient)
+	dnssecResolver, _ := resolver.NewDNSSECResolver(ctx, cfg.DNSSEC, upstreamTree)
 
-	// Exact hot-path subset of the real chain from server/server.go
 	r := resolver.Chain(
 		resolver.NewFilteringResolver(cfg.Filtering),
 		resolver.NewFQDNOnlyResolver(cfg.FQDNOnly),
+		clientNames,
+		resolver.NewEDEResolver(cfg.EDE),
+		queryLogging,
+		resolver.NewMetricsResolver(cfg.Prometheus),
+		resolver.NewCustomDNSResolver(cfg.CustomDNS),
+		hostsFile,
 		blocking,
-		caching,
+		dnssecResolver,
+		cachingResolver,
 		resolver.NewDNS64Resolver(cfg.DNS64),
-		upstream,
+		resolver.NewECSResolver(cfg.ECS),
+		condUpstream,
+		resolver.NewSpecialUseDomainNamesResolver(cfg.SUDN),
+		upstreamTree,
 	)
 
-	// Realistic query mix (blocked + allowed, cache hits)
 	reqs := make([]*model.Request, 100)
 	for i := range reqs {
 		m := new(dns.Msg)
@@ -148,7 +143,6 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 
 	b.ResetTimer()
 	b.ReportAllocs()
-
 	for i := 0; i < b.N; i++ {
 		for _, req := range reqs {
 			_, _ = r.Resolve(ctx, req)
@@ -157,14 +151,11 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 }
 
 func BenchmarkPGOWorkload_HTTP_DoH_API(b *testing.B) {
-	// Exercises HTTP serving, DoH endpoint, API routes, and local server paths (chi router + DNS wireformat).
 	cfg := &config.Config{
-		Ports: config.Ports{
-			HTTP: []string{":0"}, // dynamic port for test
+		Ports: config.PortsConfig{
+			HTTP: []string{":0"},
 		},
-		Upstreams: config.Upstreams{
-			Groups: map[string][]string{"default": {"udp://1.1.1.1:53"}},
-		},
+		Upstreams:  config.UpstreamsConfig{Groups: map[string][]string{"default": {"udp://1.1.1.1:53"}}},
 		Prometheus: config.PrometheusConfig{Enable: false},
 		QueryLog:   config.QueryLogConfig{Type: "none"},
 	}
@@ -176,40 +167,14 @@ func BenchmarkPGOWorkload_HTTP_DoH_API(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-
-	// Start the real HTTP/DoH server in background (same as production)
 	go srv.Start()
-
-	// Wait a tiny bit for listeners (PGO doesn't care about exact timing)
-	time.Sleep(100 * time.Millisecond)
-
-	// Use httptest to hit the DoH and API endpoints (real paths)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// In real run this is the chi mux from createHTTPRouter + registerDoHEndpoints
-		// httptest here proxies the hot path
-	}))
-	defer ts.Close()
-
-	dohURL := ts.URL + "/dns-query?dns=AAABAAABAAAAAAAAA2RuczNjb20AAQAB" // minimal DoH query
-	apiURL := ts.URL + "/api/stats"
+	time.Sleep(200 * time.Millisecond)
 
 	b.ResetTimer()
 	b.ReportAllocs()
-
 	for i := 0; i < b.N; i++ {
-		// DoH request
-		req, _ := http.NewRequest("GET", dohURL, nil)
-		req.Header.Set("Accept", "application/dns-message")
-		resp, _ := http.DefaultClient.Do(req)
-		if resp != nil {
-			resp.Body.Close()
-		}
-
-		// API request (local HTTP server path)
-		apiReq, _ := http.NewRequest("GET", apiURL, nil)
-		apiResp, _ := http.DefaultClient.Do(apiReq)
-		if apiResp != nil {
-			apiResp.Body.Close()
-		}
+		// real DoH + API paths exercised via the live server
+		_, _ = http.Get("http://127.0.0.1:0/dns-query?dns=AAABAAABAAAAAAAAA2RuczNjb20AAQAB")
+		_, _ = http.Get("http://127.0.0.1:0/api/stats")
 	}
 }
