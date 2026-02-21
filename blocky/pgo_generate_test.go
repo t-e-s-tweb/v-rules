@@ -1,6 +1,6 @@
 package main
 
-// pgo_generate_test.go — perfect PGO profile for your current blocky (master)
+// pgo_generate_test.go — improved PGO profile for blocky
 // Drop in repo root next to main.go
 
 import (
@@ -71,40 +71,70 @@ func BenchmarkPGOWorkload_DNSMessage(b *testing.B) {
 	}
 }
 
-// mockResolver is a mock upstream resolver that doesn't require network
-type mockResolver struct {
+// realisticResolver simulates a real upstream without network calls
+// It processes the request and returns a realistic response
+type realisticResolver struct {
+	typed    string
 	response *model.Response
 }
 
-func (m *mockResolver) Resolve(ctx context.Context, request *model.Request) (*model.Response, error) {
-	return m.response, nil
+func (r *realisticResolver) Resolve(ctx context.Context, request *model.Request) (*model.Response, error) {
+	// Simulate some processing work (like a real resolver would do)
+	resp := new(dns.Msg)
+	resp.SetReply(request.Req)
+	
+	// Add a realistic A record response
+	if len(request.Req.Question) > 0 {
+		q := request.Req.Question[0]
+		if q.Qtype == dns.TypeA {
+			rr := &dns.A{
+				Hdr: dns.RR_Header{
+					Name:   q.Name,
+					Rrtype: dns.TypeA,
+					Class:  dns.ClassINET,
+					Ttl:    300,
+				},
+				A: net.ParseIP("1.1.1.1"),
+			}
+			resp.Answer = append(resp.Answer, rr)
+		}
+	}
+	
+	return &model.Response{
+		RType: model.ResponseTypeRESOLVED,
+		Res:   resp,
+		Reason: "resolved by realistic resolver",
+	}, nil
 }
 
-func (m *mockResolver) Type() string { return "MockResolver" }
-
-func (m *mockResolver) String() string { return m.Type() }
-
-func (m *mockResolver) IsEnabled() bool { return true }
-
-func (m *mockResolver) LogConfig(logger *logrus.Entry) {
-	logger.Info("mock resolver")
+func (r *realisticResolver) Type() string { return r.typed }
+func (r *realisticResolver) String() string { return r.Type() }
+func (r *realisticResolver) IsEnabled() bool { return true }
+func (r *realisticResolver) LogConfig(logger *logrus.Entry) {
+	logger.Infof("%s resolver enabled", r.typed)
 }
 
 func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
-	// Use mock upstream to avoid network dependencies and bootstrap issues
-	mockUpstream := &mockResolver{
-		response: &model.Response{
-			RType: model.ResponseTypeRESOLVED,
-			Res:   new(dns.Msg),
-		},
+	// Create a realistic resolver that actually processes DNS messages
+	realisticUpstream := &realisticResolver{
+		typed:    "RealisticUpstream",
+		response: nil, // computed dynamically in Resolve
 	}
 
 	cfg := &config.Config{
 		Blocking: config.Blocking{
-			BlockType: "zeroIP", // Required: must be zeroIP, nxDomain, or IP address
+			BlockType: "zeroIP",
+			// Add some block lists to exercise blocking logic
+			BlockLists: map[string][]string{
+				"ads": {"ads.example.com", "doubleclick.net"},
+			},
+			ClientGroupsBlock: map[string][]string{
+				"default": {"ads"},
+			},
 		},
 		Caching: config.Caching{
 			MinCachingTime: config.Duration(60 * time.Second),
+			MaxCachingTime: config.Duration(60 * time.Minute),
 		},
 		QueryLog: config.QueryLog{
 			Type: config.QueryLogTypeNone,
@@ -114,30 +144,50 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 
 	ctx := context.Background()
 
-	// Initialize resolvers that don't require bootstrap
+	// Initialize resolvers
 	caching, err := resolver.NewCachingResolver(ctx, cfg.Caching, nil)
 	if err != nil {
 		b.Fatal("caching resolver init failed:", err)
 	}
 
+	// Create blocking resolver with the realistic upstream as next
+	blocking, err := resolver.NewBlockingResolver(ctx, cfg.Blocking, nil, nil)
+	if err != nil {
+		b.Fatal("blocking resolver init failed:", err)
+	}
+
 	filtering := resolver.NewFilteringResolver(cfg.Filtering)
 	fqdnOnly := resolver.NewFQDNOnlyResolver(cfg.FQDNOnly)
 
-	// Chain: filtering -> FQDN-only -> caching -> mock upstream
-	// Order matters: request flows left to right, response flows right to left
-	r := resolver.Chain(filtering, fqdnOnly, caching, mockUpstream)
+	// Chain: filtering -> FQDN-only -> blocking -> caching -> realistic upstream
+	r := resolver.Chain(filtering, fqdnOnly, blocking, caching, realisticUpstream)
 
+	// Mixed query types to exercise different code paths
 	reqs := make([]*model.Request, 100)
 	for i := range reqs {
 		m := new(dns.Msg)
-		if i%4 == 0 {
+		switch i % 5 {
+		case 0:
+			// Should be blocked
 			m.SetQuestion(fmt.Sprintf("ads%d.example.com.", i), dns.TypeA)
-		} else {
-			m.SetQuestion(fmt.Sprintf("google%d.com.", i), dns.TypeA)
+		case 1:
+			// Should be blocked (doubleclick pattern)
+			m.SetQuestion(fmt.Sprintf("tracker%d.doubleclick.net.", i), dns.TypeA)
+		case 2:
+			// AAAA query (IPv6)
+			m.SetQuestion(fmt.Sprintf("google%d.com.", i), dns.TypeAAAA)
+		case 3:
+			// TXT query
+			m.SetQuestion(fmt.Sprintf("txt%d.example.com.", i), dns.TypeTXT)
+		default:
+			// Normal A query
+			m.SetQuestion(fmt.Sprintf("safe-domain%d.org.", i), dns.TypeA)
 		}
+		
 		reqs[i] = &model.Request{
-			Req:      m,
-			ClientIP: net.ParseIP("192.168.1.100"),
+			Req:         m,
+			ClientIP:    net.ParseIP("192.168.1.100"),
+			ClientNames: []string{"test-client"},
 		}
 	}
 
@@ -150,23 +200,20 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 	}
 }
 
-func BenchmarkPGOWorkload_HTTP_DoH_API(b *testing.B) {
-	// Create a completely mock-based configuration to avoid network calls
+// BenchmarkPGOWorkload_HTTP_API benchmarks the HTTP API without needing upstream DNS
+// This is useful for profiling the HTTP layer specifically
+func BenchmarkPGOWorkload_HTTP_API(b *testing.B) {
 	cfg := &config.Config{
 		Ports: config.Ports{
-			HTTP: []string{"127.0.0.1:18080"}, // Use high port to avoid conflicts
+			HTTP: []string{"127.0.0.1:18080"},
 		},
-		// Use empty upstreams to avoid resolver initialization that requires network
+		// Minimal config - just enough to start HTTP server
 		Upstreams: config.Upstreams{
-			Groups: config.UpstreamGroups{}, // Empty - no upstream resolvers
+			Groups: config.UpstreamGroups{}, // Empty
 		},
 		QueryLog:   config.QueryLog{Type: config.QueryLogTypeNone},
 		Prometheus: config.Metrics{Enable: false},
-		// No BootstrapDNS - avoid network dependencies entirely
-		// Set block type to avoid validation errors
-		Blocking: config.Blocking{
-			BlockType: "zeroIP",
-		},
+		Blocking:   config.Blocking{BlockType: "zeroIP"},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -179,18 +226,86 @@ func BenchmarkPGOWorkload_HTTP_DoH_API(b *testing.B) {
 
 	errCh := make(chan error, 1)
 	go srv.Start(ctx, errCh)
-	time.Sleep(400 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	// Verify server is ready
-	if _, err := http.Get("http://127.0.0.1:18080/api/stats"); err != nil {
+	resp, err := http.Get("http://127.0.0.1:18080/api/stats")
+	if err != nil {
 		b.Fatal("server not ready:", err)
 	}
+	resp.Body.Close()
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	client := &http.Client{Timeout: 5 * time.Second}
+	
+	// Only benchmark the API endpoint (not DoH which requires upstream)
 	for i := 0; i < b.N; i++ {
-		_, _ = client.Get("http://127.0.0.1:18080/dns-query?dns=AAABAAABAAAAAAAAA2RuczNjb20AAQAB")
-		_, _ = client.Get("http://127.0.0.1:18080/api/stats")
+		resp, _ := client.Get("http://127.0.0.1:18080/api/stats")
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
+	}
+}
+
+// BenchmarkPGOWorkload_DNSResolution simulates the full DNS resolution pipeline
+// without network by using the realistic resolver chain
+func BenchmarkPGOWorkload_DNSResolution(b *testing.B) {
+	// Same setup as FullResolver but focused on DNS message processing
+	realisticUpstream := &realisticResolver{
+		typed: "DNSUpstream",
+	}
+
+	cfg := &config.Config{
+		Blocking: config.Blocking{
+			BlockType: "zeroIP",
+			BlockLists: map[string][]string{
+				"ads": {"ads.example.com"},
+			},
+			ClientGroupsBlock: map[string][]string{
+				"default": {"ads"},
+			},
+		},
+		Caching: config.Caching{
+			MinCachingTime: config.Duration(60 * time.Second),
+		},
+		QueryLog:   config.QueryLog{Type: config.QueryLogTypeNone},
+		Prometheus: config.Metrics{Enable: false},
+	}
+
+	ctx := context.Background()
+
+	caching, _ := resolver.NewCachingResolver(ctx, cfg.Caching, nil)
+	blocking, _ := resolver.NewBlockingResolver(ctx, cfg.Blocking, nil, nil)
+	filtering := resolver.NewFilteringResolver(cfg.Filtering)
+
+	r := resolver.Chain(filtering, blocking, caching, realisticUpstream)
+
+	// Pre-create diverse DNS queries
+	queries := []*model.Request{}
+	for i := 0; i < 50; i++ {
+		m := new(dns.Msg)
+		switch i % 4 {
+		case 0:
+			m.SetQuestion(fmt.Sprintf("ads%d.example.com.", i), dns.TypeA)
+		case 1:
+			m.SetQuestion(fmt.Sprintf("google%d.com.", i), dns.TypeA)
+		case 2:
+			m.SetQuestion(fmt.Sprintf("api%d.github.com.", i), dns.TypeAAAA)
+		default:
+			m.SetQuestion(fmt.Sprintf("cdn%d.cloudflare.com.", i), dns.TypeCNAME)
+		}
+		queries = append(queries, &model.Request{
+			Req:      m,
+			ClientIP: net.ParseIP("10.0.0.1"),
+		})
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		for _, req := range queries {
+			_, _ = r.Resolve(ctx, req)
+		}
 	}
 }
