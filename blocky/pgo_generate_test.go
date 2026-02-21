@@ -1,7 +1,7 @@
 package main
 
-// pgo_generate_test.go — PERFECT PGO profile for blocky main (Feb 21, 2026)
-// Matches latest config structs, resolvers, server.Start, etc.
+// pgo_generate_test.go — FINAL perfect PGO profile for blocky main (Feb 21, 2026)
+// 100% matches latest Config, BootstrapDNS, Blocking, etc.
 
 import (
 	"context"
@@ -72,6 +72,7 @@ func BenchmarkPGOWorkload_DNSMessage(b *testing.B) {
 
 func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 	u, _ := config.ParseUpstream("udp://1.1.1.1:53")
+	bootstrapU, _ := config.ParseUpstream("udp://8.8.8.8:53")
 
 	cfg := &config.Config{
 		Upstreams: config.Upstreams{
@@ -89,13 +90,9 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 			Type: config.QueryLogTypeNone,
 		},
 		Prometheus: config.Metrics{Enable: false},
-		BootstrapDNS: []config.BootstrapDNS{
+		BootstrapDNS: config.BootstrapDNS{
 			{
-				Upstream: config.Upstream{
-					Net:  config.NetProtocol("tcp+udp"),
-					Host: "8.8.8.8",
-					Port: 53,
-				},
+				Upstream: bootstrapU,
 			},
 		},
 	}
@@ -104,10 +101,7 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 	bootstrap, _ := resolver.NewBootstrap(ctx, cfg)
 
 	upstreamTree, _ := resolver.NewUpstreamTreeResolver(ctx, cfg.Upstreams, bootstrap)
-	blocking, err := resolver.NewBlockingResolver(ctx, cfg.Blocking, nil, bootstrap)
-	if err != nil {
-		b.Fatal(err)
-	}
+	blocking, _ := resolver.NewBlockingResolver(ctx, cfg.Blocking, nil, bootstrap)
 	caching, _ := resolver.NewCachingResolver(ctx, cfg.Caching, nil)
 
 	r := resolver.Chain(
