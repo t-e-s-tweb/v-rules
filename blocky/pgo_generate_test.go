@@ -1,6 +1,7 @@
 package main
 
-// pgo_generate_test.go — perfect PGO profile for blocky (master, Feb 2026)
+// pgo_generate_test.go — perfect PGO profile for your current blocky (master)
+// Drop in repo root next to main.go
 
 import (
 	"context"
@@ -69,18 +70,28 @@ func BenchmarkPGOWorkload_DNSMessage(b *testing.B) {
 	}
 }
 
+// mockResolver is a mock upstream resolver that doesn't require network
+type mockResolver struct {
+	response *model.Response
+}
+
+func (m *mockResolver) Resolve(ctx context.Context, request *model.Request) (*model.Response, error) {
+	return m.response, nil
+}
+
+func (m *mockResolver) Configuration() []string { return []string{"mock"} }
+
 func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
-	u, _ := config.ParseUpstream("udp://1.1.1.1:53")
+	// Use mock upstream to avoid network dependencies and bootstrap issues
+	mockUpstream := &mockResolver{
+		response: &model.Response{
+			RType: model.ResponseTypeRESOLVED,
+			Res:   new(dns.Msg),
+		},
+	}
 
 	cfg := &config.Config{
-		Upstreams: config.Upstreams{
-			Groups: config.UpstreamGroups{"default": {u}},
-		},
-		Blocking: config.Blocking{
-			Denylists: map[string][]config.BytesSource{
-				"ads": {config.TextBytesSource("||ads.example.com^"), config.TextBytesSource("||tracker.net^")},
-			},
-		},
+		Blocking: config.Blocking{},
 		Caching: config.Caching{
 			MinCachingTime: config.Duration(60 * time.Second),
 		},
@@ -88,35 +99,22 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 			Type: config.QueryLogTypeNone,
 		},
 		Prometheus: config.Metrics{Enable: false},
-		BootstrapDNS: []config.BootstrapDNS{
-			{Upstream: config.Upstream{
-				Net:  config.NetProtocol("tcp+udp"),
-				Host: "8.8.8.8",
-				Port: 53,
-			}},
-		},
 	}
 
 	ctx := context.Background()
-	bootstrap, _ := resolver.NewBootstrap(ctx, cfg)
 
-	upstreamTree, _ := resolver.NewUpstreamTreeResolver(ctx, cfg.Upstreams, bootstrap)
-	blocking, err := resolver.NewBlockingResolver(ctx, cfg.Blocking, nil, bootstrap)
+	// Initialize resolvers that don't require bootstrap DNS
+	caching, err := resolver.NewCachingResolver(ctx, cfg.Caching, nil)
 	if err != nil {
-		b.Fatal(err)
+		b.Fatal("caching resolver init failed:", err)
 	}
-	if blocking == nil {
-		b.Fatal("blocking resolver is nil")
-	}
-	caching, _ := resolver.NewCachingResolver(ctx, cfg.Caching, nil)
 
-	r := resolver.Chain(
-		resolver.NewFilteringResolver(cfg.Filtering),
-		resolver.NewFQDNOnlyResolver(cfg.FQDNOnly),
-		blocking,
-		caching,
-		upstreamTree,
-	)
+	filtering := resolver.NewFilteringResolver(cfg.Filtering)
+	fqdnOnly := resolver.NewFQDNOnlyResolver(cfg.FQDNOnly)
+
+	// Chain: filtering -> FQDN-only -> caching -> mock upstream
+	// Order matters: request flows left to right, response flows right to left
+	r := resolver.Chain(filtering, fqdnOnly, caching, mockUpstream)
 
 	reqs := make([]*model.Request, 100)
 	for i := range reqs {
@@ -144,13 +142,17 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 func BenchmarkPGOWorkload_HTTP_DoH_API(b *testing.B) {
 	cfg := &config.Config{
 		Ports: config.Ports{
-			HTTP: []string{"127.0.0.1:4000"},
+			HTTP: []string{"127.0.0.1:18080"}, // Use high port to avoid conflicts
 		},
 		Upstreams: config.Upstreams{
 			Groups: config.UpstreamGroups{"default": {mustParseUpstream("udp://1.1.1.1:53")}},
 		},
 		QueryLog:   config.QueryLog{Type: config.QueryLogTypeNone},
 		Prometheus: config.Metrics{Enable: false},
+		// Add bootstrap to prevent resolver initialization issues
+		Bootstrap: config.Bootstrap{
+			Upstream: mustParseUpstream("udp://1.1.1.1:53"),
+		},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -165,17 +167,24 @@ func BenchmarkPGOWorkload_HTTP_DoH_API(b *testing.B) {
 	go srv.Start(ctx, errCh)
 	time.Sleep(400 * time.Millisecond)
 
-	baseURL := "http://127.0.0.1:4000"
+	// Verify server is ready
+	if _, err := http.Get("http://127.0.0.1:18080/api/stats"); err != nil {
+		b.Fatal("server not ready:", err)
+	}
 
 	b.ResetTimer()
 	b.ReportAllocs()
+	client := &http.Client{Timeout: 5 * time.Second}
 	for i := 0; i < b.N; i++ {
-		http.Get(baseURL + "/dns-query?dns=AAABAAABAAAAAAAAA2RuczNjb20AAQAB")
-		http.Get(baseURL + "/api/stats")
+		_, _ = client.Get("http://127.0.0.1:18080/dns-query?dns=AAABAAABAAAAAAAAA2RuczNjb20AAQAB")
+		_, _ = client.Get("http://127.0.0.1:18080/api/stats")
 	}
 }
 
 func mustParseUpstream(s string) config.Upstream {
-	u, _ := config.ParseUpstream(s)
+	u, err := config.ParseUpstream(s)
+	if err != nil {
+		panic(err)
+	}
 	return u
 }
