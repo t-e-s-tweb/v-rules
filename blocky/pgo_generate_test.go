@@ -18,6 +18,7 @@ import (
 	"github.com/0xERR0R/blocky/server"
 	"github.com/0xERR0R/blocky/trie"
 	"github.com/miekg/dns"
+	"github.com/sirupsen/logrus"
 )
 
 func domainSplit(s string) (string, string) {
@@ -79,7 +80,15 @@ func (m *mockResolver) Resolve(ctx context.Context, request *model.Request) (*mo
 	return m.response, nil
 }
 
-func (m *mockResolver) Configuration() []string { return []string{"mock"} }
+func (m *mockResolver) Type() string { return "MockResolver" }
+
+func (m *mockResolver) String() string { return m.Type() }
+
+func (m *mockResolver) IsEnabled() bool { return true }
+
+func (m *mockResolver) LogConfig(logger *logrus.Entry) {
+	logger.Info("mock resolver")
+}
 
 func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 	// Use mock upstream to avoid network dependencies and bootstrap issues
@@ -103,7 +112,7 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 
 	ctx := context.Background()
 
-	// Initialize resolvers that don't require bootstrap DNS
+	// Initialize resolvers that don't require bootstrap
 	caching, err := resolver.NewCachingResolver(ctx, cfg.Caching, nil)
 	if err != nil {
 		b.Fatal("caching resolver init failed:", err)
@@ -149,9 +158,9 @@ func BenchmarkPGOWorkload_HTTP_DoH_API(b *testing.B) {
 		},
 		QueryLog:   config.QueryLog{Type: config.QueryLogTypeNone},
 		Prometheus: config.Metrics{Enable: false},
-		// Add bootstrap to prevent resolver initialization issues
-		Bootstrap: config.Bootstrap{
-			Upstream: mustParseUpstream("udp://1.1.1.1:53"),
+		// Add bootstrap DNS to prevent resolver initialization issues
+		BootstrapDNS: config.BootstrapDNS{
+			{Upstream: mustParseUpstream("udp://1.1.1.1:53")},
 		},
 	}
 
