@@ -133,8 +133,8 @@ func BenchmarkPGO_Server(b *testing.B) {
 	cfg.Upstreams.Timeout = config.Duration(3 * time.Second)
 
 	cfg.Blocking.BlockType = "zeroIP"
-	cfg.Blocking.Denylists = map[string][]string{
-		"ads": {"|" + inlineList},
+	cfg.Blocking.Denylists = map[string][]config.BytesSource{
+		"ads": {config.BytesSource(inlineList)},
 	}
 	cfg.Blocking.ClientGroupsBlock = map[string][]string{
 		"default": {"ads"},
