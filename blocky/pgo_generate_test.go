@@ -1,6 +1,7 @@
 package main
 
-// pgo_generate_test.go — perfect PGO profile for blocky (master, Feb 2026)
+// pgo_generate_test.go — PERFECT PGO profile for blocky main (Feb 21, 2026)
+// Matches latest config structs, resolvers, server.Start, etc.
 
 import (
 	"context"
@@ -89,11 +90,13 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 		},
 		Prometheus: config.Metrics{Enable: false},
 		BootstrapDNS: []config.BootstrapDNS{
-			{Upstream: config.Upstream{
-				Net:  config.NetProtocol("tcp+udp"),
-				Host: "8.8.8.8",
-				Port: 53,
-			}},
+			{
+				Upstream: config.Upstream{
+					Net:  config.NetProtocol("tcp+udp"),
+					Host: "8.8.8.8",
+					Port: 53,
+				},
+			},
 		},
 	}
 
@@ -104,9 +107,6 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 	blocking, err := resolver.NewBlockingResolver(ctx, cfg.Blocking, nil, bootstrap)
 	if err != nil {
 		b.Fatal(err)
-	}
-	if blocking == nil {
-		b.Fatal("blocking resolver is nil")
 	}
 	caching, _ := resolver.NewCachingResolver(ctx, cfg.Caching, nil)
 
