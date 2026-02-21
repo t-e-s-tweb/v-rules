@@ -1,68 +1,152 @@
-package main
+//go:build ignore
+// +build ignore
 
-// pgo_generate_test.go — improved PGO profile for blocky
-// Drop in repo root next to main.go
+// pgo_generate_test.go — PGO workload benchmarks for 0xERR0R/blocky
+//
+// Drop this file in the repo root (next to main.go) and run:
+//
+//	go test -run='^$' -bench=. -benchtime=30s -cpuprofile=default.pgo
+//	go build -pgo=default.pgo .
+//
+// Offline-only (no upstream DNS):
+//
+//	go test -run='^$' \
+//	    -bench='^BenchmarkPGO_(Trie|DNSMsg)$' \
+//	    -benchtime=30s -cpuprofile=default.pgo
+//
+// ─── Design notes ────────────────────────────────────────────────────────────
+//
+// BenchmarkPGO_Trie
+//   Exercises trie.HasParentOf — the hot inner loop of the blocking resolver.
+//   No network required.
+//
+// BenchmarkPGO_DNSMsg
+//   Exercises dns.Msg Pack/Unpack — the serialisation layer for every single
+//   request and response.  No network required.
+//
+// BenchmarkPGO_Server
+//   Starts a real blocky server on 127.0.0.1:15353 with an inline block list
+//   and 1.1.1.1 as upstream.  Drives it with a realistic mix of blocked /
+//   non-blocked / AAAA queries via dns.Client.
+//
+//   This exercises the entire hot path:
+//     server.OnRequest
+//       → FilteringResolver
+//       → BlockingResolver  (trie lookup + response construction)
+//       → CachingResolver   (cache read/write)
+//       → UpstreamResolver  (parallel best, real UDP to 1.1.1.1)
+//       → response encode → send
+//
+//   Skipped automatically when 1.1.1.1:53 is unreachable.
+
+package main
 
 import (
 	"context"
 	"fmt"
 	"net"
-	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/0xERR0R/blocky/config"
-	"github.com/0xERR0R/blocky/model"
-	"github.com/0xERR0R/blocky/resolver"
 	"github.com/0xERR0R/blocky/server"
 	"github.com/0xERR0R/blocky/trie"
 	"github.com/miekg/dns"
-	"github.com/sirupsen/logrus"
 )
 
-func domainSplit(s string) (string, string) {
-	if idx := strings.LastIndexByte(s, '.'); idx != -1 {
-		return s[idx+1:], s[:idx]
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+// splitDomain splits an FQDN into (tld, rest) for use as a trie key function.
+// "sub.ads.example.com" → ("com", "sub.ads.example")
+func splitDomain(s string) (string, string) {
+	if i := strings.LastIndexByte(s, '.'); i >= 0 {
+		return s[i+1:], s[:i]
 	}
 	return s, ""
 }
 
-func BenchmarkPGOWorkload_Trie(b *testing.B) {
-	t := trie.NewTrie(domainSplit)
-	for i := 0; i < 15000; i++ {
+// upstreamReachable returns true when 1.1.1.1:53 answers a real DNS query.
+func upstreamReachable() bool {
+	// DialTimeout on UDP always succeeds (UDP is connectionless), so we must
+	// actually exchange a query to confirm the host answers.
+	cl := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
+	m := new(dns.Msg)
+	m.SetQuestion("a.root-servers.net.", dns.TypeA)
+	_, _, err := cl.Exchange(m, "1.1.1.1:53")
+	return err == nil
+}
+
+// ─── BenchmarkPGO_Trie ───────────────────────────────────────────────────────
+
+// BenchmarkPGO_Trie is the most valuable PGO benchmark because the trie hot
+// loop runs on *every* DNS query (both blocked and clean).
+//
+// Population: 45 000 entries (≈ mid-size production block list).
+// Query mix:  ~20 % blocked sub-domains, ~80 % clean.
+func BenchmarkPGO_Trie(b *testing.B) {
+	t := trie.NewTrie(splitDomain)
+
+	// Populate three commonly blocked TLD patterns.
+	for i := 0; i < 15_000; i++ {
 		t.Insert(fmt.Sprintf("ad-%d.example.com", i))
 		t.Insert(fmt.Sprintf("tracker-%d.net", i))
+		t.Insert(fmt.Sprintf("malware-%d.io", i))
 	}
-	queries := make([]string, 200)
-	for i := range queries {
-		switch {
-		case i%3 == 0:
-			queries[i] = fmt.Sprintf("www.google%d.com", i)
-		case i%5 == 0:
-			queries[i] = fmt.Sprintf("sub.ad-%d.example.com", i)
+
+	domains := make([]string, 500)
+	for i := range domains {
+		switch i % 10 {
+		case 0, 1:
+			domains[i] = fmt.Sprintf("sub.ad-%d.example.com", i)  // blocked via parent
+		case 2:
+			domains[i] = fmt.Sprintf("cdn.tracker-%d.net", i) // blocked via parent
+		case 3:
+			domains[i] = fmt.Sprintf("deep.sub.malware-%d.io", i) // blocked via grandparent
 		default:
-			queries[i] = fmt.Sprintf("safe-domain-%d.org", i)
+			domains[i] = fmt.Sprintf("safe-%d.org", i) // clean
 		}
 	}
 
 	b.ResetTimer()
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		for _, q := range queries {
-			_ = t.HasParentOf(q)
+	for n := 0; n < b.N; n++ {
+		for _, d := range domains {
+			_ = t.HasParentOf(d)
 		}
 	}
 }
 
-func BenchmarkPGOWorkload_DNSMessage(b *testing.B) {
-	questions := []string{"example.com.", "www.github.com.", "api.openai.com.", "ads.doubleclick.net.", "tracker.example.com."}
+// ─── BenchmarkPGO_DNSMsg ─────────────────────────────────────────────────────
+
+// BenchmarkPGO_DNSMsg exercises dns.Msg Pack/Unpack, which runs on every
+// inbound request and outbound reply inside blocky.
+func BenchmarkPGO_DNSMsg(b *testing.B) {
+	type q struct {
+		name  string
+		qtype uint16
+	}
+	qs := []q{
+		{"example.com.", dns.TypeA},
+		{"www.github.com.", dns.TypeA},
+		{"api.openai.com.", dns.TypeAAAA},
+		{"ads.doubleclick.net.", dns.TypeA},
+		{"tracker.example.com.", dns.TypeTXT},
+		{"_dmarc.gmail.com.", dns.TypeTXT},
+		{"cloudflare.com.", dns.TypeAAAA},
+		{"registry.npmjs.org.", dns.TypeA},
+		{"s3.amazonaws.com.", dns.TypeA},
+		{"fonts.gstatic.com.", dns.TypeA},
+		{"cdn.jsdelivr.net.", dns.TypeA},
+		{"pagead2.googlesyndication.com.", dns.TypeA},
+	}
+
 	b.ResetTimer()
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		for _, qname := range questions {
+	for n := 0; n < b.N; n++ {
+		for _, q := range qs {
 			m := new(dns.Msg)
-			m.SetQuestion(qname, dns.TypeA)
+			m.SetQuestion(q.name, q.qtype)
 			m.SetEdns0(1232, false)
 			data, _ := m.Pack()
 			var m2 dns.Msg
@@ -71,241 +155,133 @@ func BenchmarkPGOWorkload_DNSMessage(b *testing.B) {
 	}
 }
 
-// realisticResolver simulates a real upstream without network calls
-// It processes the request and returns a realistic response
-type realisticResolver struct {
-	typed    string
-	response *model.Response
-}
+// ─── BenchmarkPGO_Server ─────────────────────────────────────────────────────
 
-func (r *realisticResolver) Resolve(ctx context.Context, request *model.Request) (*model.Response, error) {
-	// Simulate some processing work (like a real resolver would do)
-	resp := new(dns.Msg)
-	resp.SetReply(request.Req)
-	
-	// Add a realistic A record response
-	if len(request.Req.Question) > 0 {
-		q := request.Req.Question[0]
-		if q.Qtype == dns.TypeA {
-			rr := &dns.A{
-				Hdr: dns.RR_Header{
-					Name:   q.Name,
-					Rrtype: dns.TypeA,
-					Class:  dns.ClassINET,
-					Ttl:    300,
-				},
-				A: net.ParseIP("1.1.1.1"),
-			}
-			resp.Answer = append(resp.Answer, rr)
-		}
-	}
-	
-	return &model.Response{
-		RType: model.ResponseTypeRESOLVED,
-		Res:   resp,
-		Reason: "resolved by realistic resolver",
-	}, nil
-}
-
-func (r *realisticResolver) Type() string { return r.typed }
-func (r *realisticResolver) String() string { return r.Type() }
-func (r *realisticResolver) IsEnabled() bool { return true }
-func (r *realisticResolver) LogConfig(logger *logrus.Entry) {
-	logger.Infof("%s resolver enabled", r.typed)
-}
-
-func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
-	// Create a realistic resolver that actually processes DNS messages
-	realisticUpstream := &realisticResolver{
-		typed:    "RealisticUpstream",
-		response: nil, // computed dynamically in Resolve
+// BenchmarkPGO_Server runs the full blocky production path end-to-end.
+// It starts a real server on 127.0.0.1:15353 and drives it with
+// pre-built DNS queries via dns.Client.
+//
+// Skipped when 1.1.1.1 is unreachable.
+func BenchmarkPGO_Server(b *testing.B) {
+	if !upstreamReachable() {
+		b.Skip("1.1.1.1:53 unreachable — skipping full-stack benchmark")
 	}
 
-	cfg := &config.Config{
-		Blocking: config.Blocking{
-			BlockType: "zeroIP",
-			// Add some block lists to exercise blocking logic
-			BlockLists: map[string][]string{
-				"ads": {"ads.example.com", "doubleclick.net"},
-			},
-			ClientGroupsBlock: map[string][]string{
-				"default": {"ads"},
-			},
+	const listenAddr = "127.0.0.1:15353"
+
+	cfg := &config.Config{}
+
+	// Upstream: Cloudflare 1.1.1.1 over UDP/TCP
+	cfg.Upstreams.Groups = config.UpstreamGroups{
+		"default": {
+			config.Upstream{Net: config.NetProtocolTcpUdp, Host: "1.1.1.1", Port: 53},
 		},
-		Caching: config.Caching{
-			MinCachingTime: config.Duration(60 * time.Second),
-			MaxCachingTime: config.Duration(60 * time.Minute),
+	}
+	cfg.Upstreams.Timeout = config.Duration(3 * time.Second)
+
+	// Blocking: inline deny list — no HTTP download needed at startup.
+	cfg.Blocking.BlockType = "zeroIP"
+	cfg.Blocking.Denylists = map[string][]config.SourceConfig{
+		"ads": {
+			{Inline: strings.Join([]string{
+				"doubleclick.net",
+				"googleadservices.com",
+				"googlesyndication.com",
+				"pagead2.googlesyndication.com",
+				"ads.facebook.com",
+				"tracking.example.com",
+			}, "\n")},
 		},
-		QueryLog: config.QueryLog{
-			Type: config.QueryLogTypeNone,
-		},
-		Prometheus: config.Metrics{Enable: false},
+	}
+	cfg.Blocking.ClientGroupsBlock = map[string][]string{
+		"default": {"ads"},
 	}
 
-	ctx := context.Background()
+	// Caching: short minimum so we exercise both cache-miss and cache-hit paths.
+	cfg.Caching.MinCachingTime = config.Duration(30 * time.Second)
+	cfg.Caching.MaxCachingTime = config.Duration(5 * time.Minute)
 
-	// Initialize resolvers
-	caching, err := resolver.NewCachingResolver(ctx, cfg.Caching, nil)
-	if err != nil {
-		b.Fatal("caching resolver init failed:", err)
-	}
+	// Listen on a high loopback port to avoid needing CAP_NET_BIND_SERVICE.
+	cfg.Ports.DNS = config.ListenConfig{listenAddr}
 
-	// Create blocking resolver with the realistic upstream as next
-	blocking, err := resolver.NewBlockingResolver(ctx, cfg.Blocking, nil, nil)
-	if err != nil {
-		b.Fatal("blocking resolver init failed:", err)
-	}
+	// Disable noisy subsystems that add latency without PGO value.
+	cfg.QueryLog.Type = config.QueryLogTypeNone
+	cfg.Prometheus.Enable = false
 
-	filtering := resolver.NewFilteringResolver(cfg.Filtering)
-	fqdnOnly := resolver.NewFQDNOnlyResolver(cfg.FQDNOnly)
-
-	// Chain: filtering -> FQDN-only -> blocking -> caching -> realistic upstream
-	r := resolver.Chain(filtering, fqdnOnly, blocking, caching, realisticUpstream)
-
-	// Mixed query types to exercise different code paths
-	reqs := make([]*model.Request, 100)
-	for i := range reqs {
-		m := new(dns.Msg)
-		switch i % 5 {
-		case 0:
-			// Should be blocked
-			m.SetQuestion(fmt.Sprintf("ads%d.example.com.", i), dns.TypeA)
-		case 1:
-			// Should be blocked (doubleclick pattern)
-			m.SetQuestion(fmt.Sprintf("tracker%d.doubleclick.net.", i), dns.TypeA)
-		case 2:
-			// AAAA query (IPv6)
-			m.SetQuestion(fmt.Sprintf("google%d.com.", i), dns.TypeAAAA)
-		case 3:
-			// TXT query
-			m.SetQuestion(fmt.Sprintf("txt%d.example.com.", i), dns.TypeTXT)
-		default:
-			// Normal A query
-			m.SetQuestion(fmt.Sprintf("safe-domain%d.org.", i), dns.TypeA)
-		}
-		
-		reqs[i] = &model.Request{
-			Req:         m,
-			ClientIP:    net.ParseIP("192.168.1.100"),
-			ClientNames: []string{"test-client"},
-		}
-	}
-
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		for _, req := range reqs {
-			_, _ = r.Resolve(ctx, req)
-		}
-	}
-}
-
-// BenchmarkPGOWorkload_HTTP_API benchmarks the HTTP API without needing upstream DNS
-// This is useful for profiling the HTTP layer specifically
-func BenchmarkPGOWorkload_HTTP_API(b *testing.B) {
-	cfg := &config.Config{
-		Ports: config.Ports{
-			HTTP: []string{"127.0.0.1:18080"},
-		},
-		// Minimal config - just enough to start HTTP server
-		Upstreams: config.Upstreams{
-			Groups: config.UpstreamGroups{}, // Empty
-		},
-		QueryLog:   config.QueryLog{Type: config.QueryLogTypeNone},
-		Prometheus: config.Metrics{Enable: false},
-		Blocking:   config.Blocking{BlockType: "zeroIP"},
-	}
-
+	// ── start server ──────────────────────────────────────────────────────
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	b.Cleanup(cancel)
 
 	srv, err := server.NewServer(ctx, cfg)
 	if err != nil {
-		b.Fatal(err)
+		b.Fatal("server.NewServer:", err)
 	}
 
 	errCh := make(chan error, 1)
-	go srv.Start(ctx, errCh)
-	time.Sleep(200 * time.Millisecond)
+	go func() { errCh <- srv.Start(ctx, errCh) }()
 
-	// Verify server is ready
-	resp, err := http.Get("http://127.0.0.1:18080/api/stats")
-	if err != nil {
-		b.Fatal("server not ready:", err)
-	}
-	resp.Body.Close()
-
-	b.ResetTimer()
-	b.ReportAllocs()
-	client := &http.Client{Timeout: 5 * time.Second}
-	
-	// Only benchmark the API endpoint (not DoH which requires upstream)
-	for i := 0; i < b.N; i++ {
-		resp, _ := client.Get("http://127.0.0.1:18080/api/stats")
-		if resp != nil && resp.Body != nil {
-			resp.Body.Close()
-		}
-	}
-}
-
-// BenchmarkPGOWorkload_DNSResolution simulates the full DNS resolution pipeline
-// without network by using the realistic resolver chain
-func BenchmarkPGOWorkload_DNSResolution(b *testing.B) {
-	// Same setup as FullResolver but focused on DNS message processing
-	realisticUpstream := &realisticResolver{
-		typed: "DNSUpstream",
-	}
-
-	cfg := &config.Config{
-		Blocking: config.Blocking{
-			BlockType: "zeroIP",
-			BlockLists: map[string][]string{
-				"ads": {"ads.example.com"},
-			},
-			ClientGroupsBlock: map[string][]string{
-				"default": {"ads"},
-			},
-		},
-		Caching: config.Caching{
-			MinCachingTime: config.Duration(60 * time.Second),
-		},
-		QueryLog:   config.QueryLog{Type: config.QueryLogTypeNone},
-		Prometheus: config.Metrics{Enable: false},
-	}
-
-	ctx := context.Background()
-
-	caching, _ := resolver.NewCachingResolver(ctx, cfg.Caching, nil)
-	blocking, _ := resolver.NewBlockingResolver(ctx, cfg.Blocking, nil, nil)
-	filtering := resolver.NewFilteringResolver(cfg.Filtering)
-
-	r := resolver.Chain(filtering, blocking, caching, realisticUpstream)
-
-	// Pre-create diverse DNS queries
-	queries := []*model.Request{}
-	for i := 0; i < 50; i++ {
+	// Poll until the server accepts a DNS query (up to 10 s).
+	probeClient := &dns.Client{Net: "udp", Timeout: 500 * time.Millisecond}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
 		m := new(dns.Msg)
-		switch i % 4 {
-		case 0:
-			m.SetQuestion(fmt.Sprintf("ads%d.example.com.", i), dns.TypeA)
-		case 1:
-			m.SetQuestion(fmt.Sprintf("google%d.com.", i), dns.TypeA)
-		case 2:
-			m.SetQuestion(fmt.Sprintf("api%d.github.com.", i), dns.TypeAAAA)
-		default:
-			m.SetQuestion(fmt.Sprintf("cdn%d.cloudflare.com.", i), dns.TypeCNAME)
+		m.SetQuestion("health.check.local.", dns.TypeA)
+		if _, _, err := probeClient.Exchange(m, listenAddr); err == nil {
+			break
 		}
-		queries = append(queries, &model.Request{
-			Req:      m,
-			ClientIP: net.ParseIP("10.0.0.1"),
-		})
+		time.Sleep(50 * time.Millisecond)
 	}
+
+	// Fail fast if the server errored during startup.
+	select {
+	case err := <-errCh:
+		b.Fatal("server start error:", err)
+	default:
+	}
+
+	// ── pre-build query messages ───────────────────────────────────────────
+	type qentry struct {
+		name  string
+		qtype uint16
+	}
+	queries := []qentry{
+		// Non-blocked — pass to upstream first time, then served from cache.
+		{"google.com.", dns.TypeA},
+		{"github.com.", dns.TypeA},
+		{"cloudflare.com.", dns.TypeAAAA},
+		{"en.wikipedia.org.", dns.TypeA},
+		{"golang.org.", dns.TypeA},
+		{"api.github.com.", dns.TypeA},
+		{"bbc.co.uk.", dns.TypeA},
+		{"cdn.jsdelivr.net.", dns.TypeA},
+		// Blocked — blocking resolver returns 0.0.0.0 immediately (no upstream).
+		{"doubleclick.net.", dns.TypeA},
+		{"googleadservices.com.", dns.TypeA},
+		{"sub.doubleclick.net.", dns.TypeA},
+		{"tracking.example.com.", dns.TypeAAAA},
+		// Misc record types.
+		{"example.com.", dns.TypeTXT},
+		{"_dmarc.gmail.com.", dns.TypeTXT},
+		{"gmail.com.", dns.TypeMX},
+		{"cloudflare.com.", dns.TypeA},
+	}
+
+	msgs := make([]*dns.Msg, len(queries))
+	for i, q := range queries {
+		m := new(dns.Msg)
+		m.SetQuestion(q.name, q.qtype)
+		m.SetEdns0(4096, false)
+		msgs[i] = m
+	}
+
+	hotClient := &dns.Client{Net: "udp", Timeout: 3 * time.Second}
 
 	b.ResetTimer()
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		for _, req := range queries {
-			_, _ = r.Resolve(ctx, req)
-		}
+	for n := 0; n < b.N; n++ {
+		msg := msgs[n%len(msgs)]
+		clone := msg.Copy() // don't reuse ID across iterations
+		clone.Id = dns.Id()
+		_, _, _ = hotClient.Exchange(clone, listenAddr)
 	}
 }
