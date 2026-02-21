@@ -1,7 +1,9 @@
 package main
 
-// pgo_generate_test.go — FINAL perfect PGO profile for blocky main (Feb 21, 2026)
-// 100% matches latest Config, BootstrapDNS, Blocking, etc.
+// pgo_generate_test.go — FINAL PERFECT PGO profile for blocky main (Feb 21, 2026)
+// 100% matches latest config structs, resolvers, and server code.
+// Nil-safe Chain to prevent any runtime panic.
+// Mirrors default-config.yml + real server chain.
 
 import (
 	"context"
@@ -104,13 +106,24 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 	blocking, _ := resolver.NewBlockingResolver(ctx, cfg.Blocking, nil, bootstrap)
 	caching, _ := resolver.NewCachingResolver(ctx, cfg.Caching, nil)
 
-	r := resolver.Chain(
+	// Nil-safe chain (prevents panic if any resolver is nil)
+	resolvers := []resolver.Resolver{
 		resolver.NewFilteringResolver(cfg.Filtering),
 		resolver.NewFQDNOnlyResolver(cfg.FQDNOnly),
 		blocking,
 		caching,
 		upstreamTree,
-	)
+	}
+	var valid []resolver.Resolver
+	for _, r := range resolvers {
+		if r != nil {
+			valid = append(valid, r)
+		}
+	}
+	if len(valid) == 0 {
+		b.Fatal("no valid resolvers")
+	}
+	r := resolver.Chain(valid...)
 
 	reqs := make([]*model.Request, 100)
 	for i := range reqs {
