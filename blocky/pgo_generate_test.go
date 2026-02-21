@@ -149,18 +149,25 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 }
 
 func BenchmarkPGOWorkload_HTTP_DoH_API(b *testing.B) {
+	// Parse upstreams correctly - blocky format is "1.1.1.1" not "udp://1.1.1.1:53"
+	upstream1, err := config.ParseUpstream("1.1.1.1")
+	if err != nil {
+		b.Fatal("failed to parse upstream1:", err)
+	}
+
 	cfg := &config.Config{
 		Ports: config.Ports{
 			HTTP: []string{"127.0.0.1:18080"}, // Use high port to avoid conflicts
 		},
 		Upstreams: config.Upstreams{
-			Groups: config.UpstreamGroups{"default": {mustParseUpstream("udp://1.1.1.1:53")}},
+			Groups: config.UpstreamGroups{"default": {upstream1}},
 		},
 		QueryLog:   config.QueryLog{Type: config.QueryLogTypeNone},
 		Prometheus: config.Metrics{Enable: false},
 		// Add bootstrap DNS to prevent resolver initialization issues
+		// Format: slice of BootstrappedUpstream, each with Upstream field
 		BootstrapDNS: config.BootstrapDNS{
-			{Upstream: mustParseUpstream("udp://1.1.1.1:53")},
+			{Upstream: upstream1},
 		},
 	}
 
@@ -188,12 +195,4 @@ func BenchmarkPGOWorkload_HTTP_DoH_API(b *testing.B) {
 		_, _ = client.Get("http://127.0.0.1:18080/dns-query?dns=AAABAAABAAAAAAAAA2RuczNjb20AAQAB")
 		_, _ = client.Get("http://127.0.0.1:18080/api/stats")
 	}
-}
-
-func mustParseUpstream(s string) config.Upstream {
-	u, err := config.ParseUpstream(s)
-	if err != nil {
-		panic(err)
-	}
-	return u
 }
