@@ -100,7 +100,9 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 	}
 
 	cfg := &config.Config{
-		Blocking: config.Blocking{},
+		Blocking: config.Blocking{
+			BlockType: "zeroIP", // Required: must be zeroIP, nxDomain, or IP address
+		},
 		Caching: config.Caching{
 			MinCachingTime: config.Duration(60 * time.Second),
 		},
@@ -149,25 +151,21 @@ func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
 }
 
 func BenchmarkPGOWorkload_HTTP_DoH_API(b *testing.B) {
-	// Parse upstreams correctly - blocky format is "1.1.1.1" not "udp://1.1.1.1:53"
-	upstream1, err := config.ParseUpstream("1.1.1.1")
-	if err != nil {
-		b.Fatal("failed to parse upstream1:", err)
-	}
-
+	// Create a completely mock-based configuration to avoid network calls
 	cfg := &config.Config{
 		Ports: config.Ports{
 			HTTP: []string{"127.0.0.1:18080"}, // Use high port to avoid conflicts
 		},
+		// Use empty upstreams to avoid resolver initialization that requires network
 		Upstreams: config.Upstreams{
-			Groups: config.UpstreamGroups{"default": {upstream1}},
+			Groups: config.UpstreamGroups{}, // Empty - no upstream resolvers
 		},
 		QueryLog:   config.QueryLog{Type: config.QueryLogTypeNone},
 		Prometheus: config.Metrics{Enable: false},
-		// Add bootstrap DNS to prevent resolver initialization issues
-		// Format: slice of BootstrappedUpstream, each with Upstream field
-		BootstrapDNS: config.BootstrapDNS{
-			{Upstream: upstream1},
+		// No BootstrapDNS - avoid network dependencies entirely
+		// Set block type to avoid validation errors
+		Blocking: config.Blocking{
+			BlockType: "zeroIP",
 		},
 	}
 
