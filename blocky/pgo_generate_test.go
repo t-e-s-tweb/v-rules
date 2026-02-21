@@ -1,102 +1,66 @@
-// pgo_generate_test.go — PGO workload benchmarks for 0xERR0R/blocky
-//
-// Drop this file in the repo root (next to main.go) and run:
-//
-//	go test -run='^$' -bench=. -benchtime=30s -cpuprofile=default.pgo .
-//	go build -pgo=default.pgo .
-//
-// Offline-only (no upstream DNS):
-//
-//	go test -run='^$' -bench='^BenchmarkPGO_(Trie|DNSMsg)$' -benchtime=30s -cpuprofile=default.pgo .
-
 package main
+
+// pgo_generate_test.go — perfect PGO profile for blocky (master, Feb 2026)
 
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/0xERR0R/blocky/config"
+	"github.com/0xERR0R/blocky/model"
+	"github.com/0xERR0R/blocky/resolver"
 	"github.com/0xERR0R/blocky/server"
 	"github.com/0xERR0R/blocky/trie"
 	"github.com/miekg/dns"
 )
 
-func splitDomain(s string) (string, string) {
-	if i := strings.LastIndexByte(s, '.'); i >= 0 {
-		return s[i+1:], s[:i]
+func domainSplit(s string) (string, string) {
+	if idx := strings.LastIndexByte(s, '.'); idx != -1 {
+		return s[idx+1:], s[:idx]
 	}
 	return s, ""
 }
 
-func upstreamReachable() bool {
-	cl := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
-	m := new(dns.Msg)
-	m.SetQuestion("a.root-servers.net.", dns.TypeA)
-	_, _, err := cl.Exchange(m, "1.1.1.1:53")
-	return err == nil
-}
-
-// ─── BenchmarkPGO_Trie ───────────────────────────────────────────────────────
-
-func BenchmarkPGO_Trie(b *testing.B) {
-	t := trie.NewTrie(splitDomain)
-	for i := 0; i < 15_000; i++ {
+func BenchmarkPGOWorkload_Trie(b *testing.B) {
+	t := trie.NewTrie(domainSplit)
+	for i := 0; i < 15000; i++ {
 		t.Insert(fmt.Sprintf("ad-%d.example.com", i))
 		t.Insert(fmt.Sprintf("tracker-%d.net", i))
-		t.Insert(fmt.Sprintf("malware-%d.io", i))
 	}
-	domains := make([]string, 500)
-	for i := range domains {
-		switch i % 10 {
-		case 0, 1:
-			domains[i] = fmt.Sprintf("sub.ad-%d.example.com", i)
-		case 2:
-			domains[i] = fmt.Sprintf("cdn.tracker-%d.net", i)
-		case 3:
-			domains[i] = fmt.Sprintf("deep.sub.malware-%d.io", i)
+	queries := make([]string, 200)
+	for i := range queries {
+		switch {
+		case i%3 == 0:
+			queries[i] = fmt.Sprintf("www.google%d.com", i)
+		case i%5 == 0:
+			queries[i] = fmt.Sprintf("sub.ad-%d.example.com", i)
 		default:
-			domains[i] = fmt.Sprintf("safe-%d.org", i)
+			queries[i] = fmt.Sprintf("safe-domain-%d.org", i)
 		}
 	}
+
 	b.ResetTimer()
 	b.ReportAllocs()
-	for n := 0; n < b.N; n++ {
-		for _, d := range domains {
-			_ = t.HasParentOf(d)
+	for i := 0; i < b.N; i++ {
+		for _, q := range queries {
+			_ = t.HasParentOf(q)
 		}
 	}
 }
 
-// ─── BenchmarkPGO_DNSMsg ─────────────────────────────────────────────────────
-
-func BenchmarkPGO_DNSMsg(b *testing.B) {
-	type q struct {
-		name  string
-		qtype uint16
-	}
-	qs := []q{
-		{"example.com.", dns.TypeA},
-		{"www.github.com.", dns.TypeA},
-		{"api.openai.com.", dns.TypeAAAA},
-		{"ads.doubleclick.net.", dns.TypeA},
-		{"tracker.example.com.", dns.TypeTXT},
-		{"_dmarc.gmail.com.", dns.TypeTXT},
-		{"cloudflare.com.", dns.TypeAAAA},
-		{"registry.npmjs.org.", dns.TypeA},
-		{"s3.amazonaws.com.", dns.TypeA},
-		{"fonts.gstatic.com.", dns.TypeA},
-		{"cdn.jsdelivr.net.", dns.TypeA},
-		{"pagead2.googlesyndication.com.", dns.TypeA},
-	}
+func BenchmarkPGOWorkload_DNSMessage(b *testing.B) {
+	questions := []string{"example.com.", "www.github.com.", "api.openai.com.", "ads.doubleclick.net.", "tracker.example.com."}
 	b.ResetTimer()
 	b.ReportAllocs()
-	for n := 0; n < b.N; n++ {
-		for _, q := range qs {
+	for i := 0; i < b.N; i++ {
+		for _, qname := range questions {
 			m := new(dns.Msg)
-			m.SetQuestion(q.name, q.qtype)
+			m.SetQuestion(qname, dns.TypeA)
 			m.SetEdns0(1232, false)
 			data, _ := m.Pack()
 			var m2 dns.Msg
@@ -105,116 +69,113 @@ func BenchmarkPGO_DNSMsg(b *testing.B) {
 	}
 }
 
-// ─── BenchmarkPGO_Server ─────────────────────────────────────────────────────
+func BenchmarkPGOWorkload_FullResolver(b *testing.B) {
+	u, _ := config.ParseUpstream("udp://1.1.1.1:53")
 
-func BenchmarkPGO_Server(b *testing.B) {
-	if !upstreamReachable() {
-		b.Skip("1.1.1.1:53 unreachable — skipping full-stack benchmark")
-	}
-
-	const listenAddr = "127.0.0.1:15353"
-
-	inlineList := strings.Join([]string{
-		"doubleclick.net",
-		"googleadservices.com",
-		"googlesyndication.com",
-		"pagead2.googlesyndication.com",
-		"ads.facebook.com",
-		"tracking.example.com",
-	}, "\n")
-
-	cfg := &config.Config{}
-
-	cfg.Upstreams.Groups = config.UpstreamGroups{
-		"default": {
-			config.Upstream{Net: config.NetProtocolTcpUdp, Host: "1.1.1.1", Port: 53},
+	cfg := &config.Config{
+		Upstreams: config.Upstreams{
+			Groups: config.UpstreamGroups{"default": {u}},
+		},
+		Blocking: config.Blocking{
+			Denylists: map[string][]config.BytesSource{
+				"ads": {config.TextBytesSource("||ads.example.com^"), config.TextBytesSource("||tracker.net^")},
+			},
+		},
+		Caching: config.Caching{
+			MinCachingTime: config.Duration(60 * time.Second),
+		},
+		QueryLog: config.QueryLog{
+			Type: config.QueryLogTypeNone,
+		},
+		Prometheus: config.Metrics{Enable: false},
+		BootstrapDNS: []config.BootstrapDNS{
+			{Upstream: config.Upstream{
+				Net:  config.NetProtocol("tcp+udp"),
+				Host: "8.8.8.8",
+				Port: 53,
+			}},
 		},
 	}
-	cfg.Upstreams.Timeout = config.Duration(3 * time.Second)
 
-	cfg.Blocking.BlockType = "zeroIP"
-	cfg.Blocking.Denylists = map[string][]config.BytesSource{
-		"ads": {config.BytesSource(inlineList)},
+	ctx := context.Background()
+	bootstrap, _ := resolver.NewBootstrap(ctx, cfg)
+
+	upstreamTree, _ := resolver.NewUpstreamTreeResolver(ctx, cfg.Upstreams, bootstrap)
+	blocking, err := resolver.NewBlockingResolver(ctx, cfg.Blocking, nil, bootstrap)
+	if err != nil {
+		b.Fatal(err)
 	}
-	cfg.Blocking.ClientGroupsBlock = map[string][]string{
-		"default": {"ads"},
+	if blocking == nil {
+		b.Fatal("blocking resolver is nil")
+	}
+	caching, _ := resolver.NewCachingResolver(ctx, cfg.Caching, nil)
+
+	r := resolver.Chain(
+		resolver.NewFilteringResolver(cfg.Filtering),
+		resolver.NewFQDNOnlyResolver(cfg.FQDNOnly),
+		blocking,
+		caching,
+		upstreamTree,
+	)
+
+	reqs := make([]*model.Request, 100)
+	for i := range reqs {
+		m := new(dns.Msg)
+		if i%4 == 0 {
+			m.SetQuestion(fmt.Sprintf("ads%d.example.com.", i), dns.TypeA)
+		} else {
+			m.SetQuestion(fmt.Sprintf("google%d.com.", i), dns.TypeA)
+		}
+		reqs[i] = &model.Request{
+			Req:      m,
+			ClientIP: net.ParseIP("192.168.1.100"),
+		}
 	}
 
-	cfg.Caching.MinCachingTime = config.Duration(30 * time.Second)
-	cfg.Caching.MaxCachingTime = config.Duration(5 * time.Minute)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		for _, req := range reqs {
+			_, _ = r.Resolve(ctx, req)
+		}
+	}
+}
 
-	cfg.Ports.DNS = config.ListenConfig{listenAddr}
-
-	cfg.QueryLog.Type = config.QueryLogTypeNone
-	cfg.Prometheus.Enable = false
+func BenchmarkPGOWorkload_HTTP_DoH_API(b *testing.B) {
+	cfg := &config.Config{
+		Ports: config.Ports{
+			HTTP: []string{"127.0.0.1:4000"},
+		},
+		Upstreams: config.Upstreams{
+			Groups: config.UpstreamGroups{"default": {mustParseUpstream("udp://1.1.1.1:53")}},
+		},
+		QueryLog:   config.QueryLog{Type: config.QueryLogTypeNone},
+		Prometheus: config.Metrics{Enable: false},
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	b.Cleanup(cancel)
+	defer cancel()
 
 	srv, err := server.NewServer(ctx, cfg)
 	if err != nil {
-		b.Fatal("server.NewServer:", err)
+		b.Fatal(err)
 	}
 
 	errCh := make(chan error, 1)
 	go srv.Start(ctx, errCh)
+	time.Sleep(400 * time.Millisecond)
 
-	probeClient := &dns.Client{Net: "udp", Timeout: 500 * time.Millisecond}
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		m := new(dns.Msg)
-		m.SetQuestion("health.check.local.", dns.TypeA)
-		if _, _, err := probeClient.Exchange(m, listenAddr); err == nil {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	select {
-	case err := <-errCh:
-		b.Fatal("server start error:", err)
-	default:
-	}
-
-	type qentry struct {
-		name  string
-		qtype uint16
-	}
-	queries := []qentry{
-		{"google.com.", dns.TypeA},
-		{"github.com.", dns.TypeA},
-		{"cloudflare.com.", dns.TypeAAAA},
-		{"en.wikipedia.org.", dns.TypeA},
-		{"golang.org.", dns.TypeA},
-		{"api.github.com.", dns.TypeA},
-		{"bbc.co.uk.", dns.TypeA},
-		{"cdn.jsdelivr.net.", dns.TypeA},
-		{"doubleclick.net.", dns.TypeA},
-		{"googleadservices.com.", dns.TypeA},
-		{"sub.doubleclick.net.", dns.TypeA},
-		{"tracking.example.com.", dns.TypeAAAA},
-		{"example.com.", dns.TypeTXT},
-		{"_dmarc.gmail.com.", dns.TypeTXT},
-		{"gmail.com.", dns.TypeMX},
-		{"cloudflare.com.", dns.TypeA},
-	}
-
-	msgs := make([]*dns.Msg, len(queries))
-	for i, q := range queries {
-		m := new(dns.Msg)
-		m.SetQuestion(q.name, q.qtype)
-		m.SetEdns0(4096, false)
-		msgs[i] = m
-	}
-
-	hotClient := &dns.Client{Net: "udp", Timeout: 3 * time.Second}
+	baseURL := "http://127.0.0.1:4000"
 
 	b.ResetTimer()
 	b.ReportAllocs()
-	for n := 0; n < b.N; n++ {
-		msg := msgs[n%len(msgs)]
-		clone := msg.Copy()
-		clone.Id = dns.Id()
-		_, _, _ = hotClient.Exchange(clone, listenAddr)
+	for i := 0; i < b.N; i++ {
+		http.Get(baseURL + "/dns-query?dns=AAABAAABAAAAAAAAA2RuczNjb20AAQAB")
+		http.Get(baseURL + "/api/stats")
 	}
+}
+
+func mustParseUpstream(s string) config.Upstream {
+	u, _ := config.ParseUpstream(s)
+	return u
 }
