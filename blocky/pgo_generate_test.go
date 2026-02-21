@@ -1,6 +1,3 @@
-//go:build ignore
-// +build ignore
-
 // pgo_generate_test.go — PGO workload benchmarks for 0xERR0R/blocky
 //
 // Drop this file in the repo root (next to main.go) and run:
