@@ -169,6 +169,7 @@ jobs:
           cp ./domains/malware.txt ./v2ray-geosite/data/malware
           cp ./domains/phishing.txt ./v2ray-geosite/data/phishing
           cp ./domains/cryptominers.txt ./v2ray-geosite/data/cryptominers
+          cp ./domains/nsfw.txt ./v2ray-geosite/data/nwww
            
 
           ./geosite --datapath=./v2ray-geosite/data --outputdir=./release --outputname=geosite.dat --exportlists=pktld,category-ads-all,malware,phishing,cryptominers
