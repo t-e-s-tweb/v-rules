@@ -129,12 +129,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-   #   - name: Generate nsfw domains list
-    #    run: |
-    #      chmod +x ./scripts/generate-nsfw-domains.sh
-   #       ./scripts/generate-nsfw-domains.sh
-    #    env:
-    #      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate nsfw domains list
+        run: |
+          chmod +x ./scripts/generate-nsfw-domains.sh
+          ./scripts/generate-nsfw-domains.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
    #   - name: Generate sanctioned domains list
   #      run: |
