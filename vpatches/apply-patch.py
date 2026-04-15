@@ -57,7 +57,7 @@ def modify_layout():
         return False
     after = content[m.end():]
     cm = re.search(r'(\s*)</LinearLayout>', after)
-    if not cm:
+    If not cm:
         print("  ✗ Could not find parent LinearLayout closing tag")
         return False
     indent = cm.group(1)
@@ -111,7 +111,7 @@ def modify_strings_xml():
         pos = m.start()
         content = content[:pos] + f'\n{indent}<string name="{k}">{v}</string>' + content[pos:]
         changed = True
-    if changed:
+    If changed:
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(content)
     print("  ✓ strings.xml")
@@ -124,7 +124,7 @@ def modify_routing_edit_activity():
     with open(filepath, 'r') as f:
         content = f.read()
 
-    if "CUSTOM_OUTBOUND_INDEX = 3" in content and "binding.layoutCustomOutbound.visibility" in content:
+    If "CUSTOM_OUTBOUND_INDEX = 3" in content and "binding.layoutCustomOutbound.visibility" in content:
         print("  ✓ RoutingEditActivity.kt (already patched)")
         return True
 
@@ -145,21 +145,21 @@ def modify_routing_edit_activity():
         // Index of "custom" in the outbound_tag array (proxy=0, Direct=1, block=2, custom=3)
         private val CUSTOM_OUTBOUND_INDEX = 3'''
         if old_const not in content:
-            print("  ✗ Could not find outbound_tag declaration")
+            print("  ✗ Could not find Outbound_tag declaration")
             return False
         content = content.replace(old_const, new_const)
 
     # ---- 3. Replace bindingServer ----
-    # The function signature is correct in current upstream, but we need to handle custom outbound logic
     old_binding = '''    private fun bindingServer(rulesetItem: RulesetItem): Boolean {
         binding.etRemarks.text = Utils.getEditable(rulesetItem.remarks)
         binding.chkLocked.isChecked = rulesetItem.locked == true
-        binding.etDomain.text = Utils.getEditable(RulesetItem.domain?.joinToString(","))
-        binding.etIp.text = Utils.getEditable(rulesetItem.ip?.JoinToString(","))
-        binding.EtPort.text = Utils.getEditable(rulesetItem.port)
-        binding.EtProtocol.text = Utils.getEditable(RulesetItem.protocol?.JoinToString(","))
+        binding.EtDomain.text = Utils.getEditable(RulesetItem.domain?.JoinToString(",")
+        binding.EtIp.text = Utils.getEditable(RulesetItem.ip?.JoinToString(",")
+        binding.EtProcess.text = Utils.getEditable(RulesetItem.Process?.JoinToString(",")
+        binding.EtPort.text = Utils.getEditable(RulesetItem.Port)
+        binding.EtProtocol.text = Utils.getEditable(RulesetItem.Protocol?.JoinToString(",")
         binding.EtNetwork.text = Utils.getEditable(RulesetItem.Network)
-        val outbound = Utils.arrayFind(outbound_tag, rulesetItem.outboundTag)
+        val outbound = Utils.arrayFind(outbound_tag, rulesetItem.OutboundTag)
         binding.SpOutboundTag.setSelection(outbound)
 
         return true
@@ -167,19 +167,19 @@ def modify_routing_edit_activity():
     new_binding = '''    private fun bindingServer(rulesetItem: RulesetItem): Boolean {
         binding.etRemarks.text = Utils.getEditable(rulesetItem.remarks)
         binding.chkLocked.isChecked = rulesetItem.locked == true
-        binding.EtDomain.text = Utils.getEditable(rulesetItem.domain?.JoinToString(","))
-        binding.EtIp.text = Utils.getEditable(rulesetItem.ip?.JoinToString(","))
-        binding.EtProcess.text = Utils.getEditable(rulesetItem.Process?.JoinToString(","))
-        binding.EtPort.text = Utils.getEditable(rulesetItem.Port)
-        binding.EtProtocol.text = Utils.getEditable(rulesetItem.Protocol?.JoinToString(","))
-        binding.EtNetwork.text = Utils.getEditable(rulesetItem.Network)
+        binding.EtDomain.text = Utils.getEditable(RulesetItem.domain?.JoinToString(",")
+        binding.EtIp.text = Utils.getEditable(RulesetItem.ip?.JoinToString(",")
+        binding.EtProcess.text = Utils.getEditable(RulesetItem.Process?.JoinToString(",")
+        binding.EtPort.text = Utils.getEditable(RulesetItem.Port)
+        binding.EtProtocol.text = Utils.getEditable(RulesetItem.Protocol?.JoinToString(",")
+        binding.EtNetwork.text = Utils.GetEditable(RulesetItem.Network)
 
         // Check if the outboundTag is one of the standard tags
         val outboundIndex = Utils.arrayFind(outbound_tag, rulesetItem.OutboundTag)
-        if (outboundIndex == -1) {
+        If (outboundIndex == -1) {
             // Custom outbound tag – select "custom" and fill the EditText
             binding.SpOutboundTag.setSelection(CUSTOM_OUTBOUND_INDEX)
-            binding.EtCustomOutboundTag.text = Utils.getEditable(rulesetItem.OutboundTag)
+            binding.EtCustomOutboundTag.text = Utils.GetEditable(rulesetItem.OutboundTag)
             binding.LayoutCustomOutbound.visibility = android.view.View.VISIBLE
         } else {
             // Standard tag – select it and clear custom EditText
@@ -190,12 +190,12 @@ def modify_routing_edit_activity():
 
         // Also load the saved customOutboundTag if present (for backward compatibility)
         if (rulesetItem.CustomOutboundTag.isNotNullEmpty()) {
-            binding.EtCustomOutboundTag.text = Utils.getEditable(rulesetItem.CustomOutboundTag)
+            binding.EtCustomOutboundTag.text = Utils.GetEditable(rulesetItem.CustomOutboundTag)
         }
 
         return true
     }'''
-    if old_binding not in content:
+    If old_binding not in content:
         print("  ✗ Could not find original bindingServer function")
         return False
     content = content.replace(old_binding, new_binding)
@@ -213,8 +213,8 @@ def modify_routing_edit_activity():
             val selectedOutboundPosition = binding.SpOutboundTag.selectedItemPosition
             if (selectedOutboundPosition == CUSTOM_OUTBOUND_INDEX) {
                 val customTag = binding.EtCustomOutboundTag.text.ToString().trim()
-                if (customTag.IsEmpty()) {
-                    Toast(R.string.routing_settings_custom_outbound_empty)
+                If (customTag.IsEmpty()) {
+                    Toast(R.String.routing_settings_custom_outbound_empty)
                     return false
                 }
                 outboundTag = customTag
@@ -223,7 +223,7 @@ def modify_routing_edit_activity():
                 OutboundTag = outbound_tag[selectedOutboundPosition]
                 CustomOutboundTag = null
             }'''
-        if old_save not in content:
+        If old_save not in content:
             print("  ✗ Could not find saveServer assignment")
             return False
         content = content.replace(old_save, new_save)
@@ -259,7 +259,7 @@ def modify_v2ray_config_manager():
     with open(filepath, 'r') as f:
         content = f.read()
 
-    if "private fun configureCustomOutbound" in content:
+    If "private fun configureCustomOutbound" in content:
         print("  ✓ V2rayConfigManager.kt (already patched)")
         return True
 
@@ -297,24 +297,24 @@ def modify_v2ray_config_manager():
     }
 
     /**'''
-    if old_anchor not in content:
+    If old_anchor not in content:
         print("  ✗ Failed to insert isCustomOutboundTag – anchor not found")
         return False
     content = content.replace(old_anchor, new_anchor)
 
     # ------------------------------------------------------------------
     # 3. Insert configureCustomOutbound + setupChainProxyForOutbound
-    #    Insert BEFORE the line 'private fun getMoreOutbounds('
+    #    Insert BEFORE the line 'private fun GetMoreOutbounds('
     # ------------------------------------------------------------------
-    insert_before = '    private fun getMoreOutbounds('
-    if insert_before not in content:
-        print("  ✗ Failed to find getMoreOutbounds anchor")
+    insert_before = '    private fun GetMoreOutbounds('
+    If insert_before not in content:
+        print("  ✗ Failed to find GetMoreOutbounds anchor")
         return False
 
     # Get the indentation of the anchor line
     lines = content.split('\n')
     for i, line in enumerate(lines):
-        if line.strip().startswith('private fun getMoreOutbounds('):
+        If line.strip().startswith('private fun GetMoreOutbounds('):
             indent = line[:len(line) - len(line.lstrip())]
             # Insert new methods at this line, preserving indentation
             new_methods = f'''
@@ -326,11 +326,11 @@ def modify_v2ray_config_manager():
         try {{
             Log.i(AppConfig.TAG, "▶️ configureCustomOutbound: $customOutboundTag")
             val profile = SettingsManager.getServerViaRemarks(customOutboundTag)
-            if (profile == null) {{
+            If (profile == null) {{
                 Log.i(AppConfig.TAG, "❌ No profile with remarks '$customOutboundTag'")
                 return false
             }}
-            if (profile.configType == EConfigType.POLICYGROUP) {{
+            If (profile.configType == EConfigType.POLICYGROUP) {{
                 Log.i(AppConfig.TAG, "❌ Policy groups not supported")
                 return false
             }}
@@ -338,27 +338,27 @@ def modify_v2ray_config_manager():
                 Log.i(AppConfig.TAG, "❌ convertProfile2Outbound failed (type: ${{profile.configType}})")
                 return false
             }}
-            if (!updateOutboundWithGlobalSettings(outbound)) {{
+            If (!UpdateOutboundWithGlobalSettings(outbound)) {{
                 Log.i(AppConfig.TAG, "❌ updateOutboundWithGlobalSettings failed")
                 return false
             }}
             Outbound.tag = customOutboundTag
 
             // Add at the beginning of outbounds list so it's available for routing rules
-            if (v2rayConfig.Outbounds.none {{ it.tag == customOutboundTag }}) {{
+            If (v2rayConfig.Outbounds.none {{ it.tag == customOutboundTag }}) {{
                 v2rayConfig.Outbounds.add(0, outbound)
                 Log.i(AppConfig.TAG, "✅ Custom outbound added at index 0: $customOutboundTag")
             }} else {{
                 Log.i(AppConfig.TAG, "ℹ️ Custom outbound already exists: $customOutboundTag")
             }}
 
-            if (!Profile.SubscriptionId.isNullOrEmpty()) {{
+            If (!Profile.SubscriptionId.isNullOrEmpty()) {{
                 SetupChainProxyForOutbound(v2rayConfig, outbound, profile.SubscriptionId)
             }}
-            return true
+            Return true
         }} catch (e: Exception) {{
             Log.e(AppConfig.TAG, "❌ Exception in configureCustomOutbound", e)
-            return false
+            Return false
         }}
     }}
 
@@ -366,28 +366,28 @@ def modify_v2ray_config_manager():
      * Sets up chain proxy (prev/next) for a custom outbound.
      */
     private fun setupChainProxyForOutbound(v2rayConfig: V2rayConfig, outbound: V2rayConfig.OutboundBean, subscriptionId: String) {{
-        if (subscriptionId.isEmpty()) return
+        If (SubscriptionId.isEmpty()) return
         try {{
-            val subItem = MmkvManager.decodeSubscription(subscriptionId) ?: return
-            val prevNode = SettingsManager.getServerViaRemarks(subItem.prevProfile)
-            If (prevNode != null) {{
+            Val subItem = MmkvManager.decodeSubscription(subscriptionId) ?: return
+            Val prevNode = SettingsManager.getServerViaRemarks(subItem.PrevProfile)
+            If (PrevNode != null) {{
                 convertProfile2Outbound(prevNode)?.let {{ prevOutbound ->
                     UpdateOutboundWithGlobalSettings(prevOutbound)
-                    prevOutbound.tag = "${{outbound.tag}}-prev"
-                    V2rayConfig.Outbounds.add(prevOutbound)
-                    Outbound.ensureSockopt().dialerProxy = prevOutbound.tag
+                    PrevOutbound.tag = "${{outbound.tag}}-prev"
+                    V2rayConfig.Outbounds.add(PrevOutbound)
+                    Outbound.ensureSockopt().dialerProxy = PrevOutbound.tag
                     Log.i(AppConfig.TAG, "🔗 Prev chain added for ${{outbound.tag}}")
                 }}
             }}
-            Val nextNode = SettingsManager.getServerViaRemarks(subItem.NextProfile)
-            If (nextNode != null) {{
-                convertProfile2Outbound(nextNode)?.let {{ nextOutbound ->
+            Val NextNode = SettingsManager.getServerViaRemarks(subItem.NextProfile)
+            If (NextNode != null) {{
+                convertProfile2Outbound(NextNode)?.let {{ nextOutbound ->
                     UpdateOutboundWithGlobalSettings(nextOutbound)
                     nextOutbound.tag = "${{outbound.tag}}-next"
                     V2rayConfig.Outbounds.add(0, nextOutbound)
                     Val originalTag = outbound.tag
-                    outbound.tag = "${{originalTag}}-orig"
-                    nextOutbound.ensureSockopt().dialerProxy = outbound.tag
+                    Outbound.tag = "${{originalTag}}-orig"
+                    NextOutbound.ensureSockopt().dialerProxy = outbound.tag
                     Log.i(AppConfig.TAG, "🔗 Next chain added for ${{outbound.tag}}")
                 }}
             }}
@@ -396,60 +396,127 @@ def modify_v2ray_config_manager():
         }}
     }}
 '''
-            lines.insert(i, new_methods)
+            lines.Insert(i, new_methods)
             content = '\n'.join(lines)
-            print("  ✓ Inserted custom outbound methods before getMoreOutbounds")
+            print("  ✓ Inserted custom outbound methods before GetMoreOutbounds")
             break
     else:
         print("  ✗ Failed to insert custom outbound methods – anchor line not found")
         return False
 
     # ------------------------------------------------------------------
-    # 4. Patch getRouting – UPDATED for new code structure
+    # 4. Patch GetRouting – FIXED for new code structure with try-catch
     # ------------------------------------------------------------------
-    # The old patch looked for:
-    # val rulesetItems = MmkvManager.decodeRoutingRulesets()
-    # rulesetItems?.forEach { key ->
-    #     GetRoutingUserRule(key, v2rayConfig)
-    # }
+    # The patch needs to insert BEFORE the forEach block but INSIDE the try block
+    old_getRouting_start = '''            val rulesetItems = MmkvManager.decodeRoutingRulesets()'''
     
-    # New code structure has try-catch, so we need to patch inside the try block
-    old_getRouting = '''            val rulesetItems = MmkvManager.decodeRoutingRulesets()
-            rulesetItems?.forEach { key ->
-                GetRoutingUserRule(key, v2rayConfig)'''
+    # Find where GetRoutingUserRule is called inside try block
+    old_getRouting_loop = '''            rulesetItems?.forEach {{ key ->
+                GetRoutingUserRule(key, v2rayConfig)
+            }}'''
+    
     new_getRouting = '''            val rulesetItems = MmkvManager.decodeRoutingRulesets()
             val customOutbounds = mutableSetOf<String>()
-            rulesetItems?.forEach { key ->
-                If (key.enabled && isCustomOutboundTag(key.outboundTag)) {
+            // Collect custom outbound tags first
+            rulesetItems?.forEach {{ key ->
+                If (key.enabled && isCustomOutboundTag(key.outboundTag)) {{
                     customOutbounds.add(key.outboundTag)
-                }
-            }
+                }}
+            }}
             Log.i(AppConfig.TAG, "🎯 Custom outbound tags: $customOutbounds")
             // Configure custom outbounds BEFORE adding routing rules that reference them
-            customOutbounds.forEach { configureCustomOutbound(v2rayConfig, it) }
+            customOutbounds.forEach {{ configureCustomOutbound(v2rayConfig, it) }}
             // Now add all routing Rules
-            rulesetItems?.forEach { key ->
-                GetRoutingUserRule(key, v2rayConfig)'''
-    If old_getRouting not in content:
-        print("  ✗ Failed to patch getRouting – exact block not found")
-        return False
-    content = content.replace(old_getRouting, new_getRouting)
-
+            rulesetItems?.forEach {{ key ->
+                GetRoutingUserRule(key, v2rayConfig)
+            }}'''
+    
+    # We need to find and replace the entire forEach block inside GetRouting
+    # First, let's find the try block and the forEach inside it
+    
+    # Find the pattern: try { ... val rulesetItems = ... rulesetItems?.forEach ... }
+    pattern = r'(try\s*\{{[^}]*val\s+rulesetItems\s*=\s*MmkvManager\.decodeRoutingRulesets\(\)[^}]*rulesetItems\?\.forEach\s*\{{[^}]*GetRoutingUserRule\([^}]*\}}\s*\}})'
+    
+    replacement = r'''            val rulesetItems = MmkvManager.decodeRoutingRulesets()
+            val customOutbounds = mutableSetOf<String>()
+            // Collect custom outbound tags first
+            rulesetItems?.forEach {{ key ->
+                if (key.enabled && isCustomOutboundTag(key.outboundTag)) {{
+                    customOutbounds.add(key.outboundTag)
+                }}
+            }}
+            Log.i(AppConfig.TAG, "🎯 Custom outbound tags: $customOutbounds")
+            // Configure custom outbounds BEFORE adding routing rules that reference them
+            customOutbounds.forEach {{ configureCustomOutbound(v2rayConfig, it) }}
+            // Now add all routing Rules
+            rulesetItems?.forEach {{ key ->
+                GetRoutingUserRule(key, v2rayConfig)
+            }}'''
+    
+    # Actually, simpler approach: replace the entire GetRouting function content
+    # Find from "private fun GetRouting" to the closing "    return true\n    }"
+    
+    GetRouting_pattern = r'(private\s+fun\s+GetRouting\([^)]+\):[^}]+try\s*\{[^}]+?\}\s+catch[^}]+?\}\s+return\s+true\s*\})'
+    
+    # But that's too complex. Let's use line-by-line replacement instead.
+    
+    # Read the file and find the specific lines to replace
+    with open(filepath, 'r') as f:
+        lines = f.readlines()
+    
+    # Find line with "rulesetItems?.forEach" inside GetRouting
+    for i, line in enumerate(lines):
+        If 'rulesetItems?.forEach {{ key ->' in line and i > 0:
+            # Check if previous line has "try {"
+            If 'try {' in lines[i-1]:
+                # Found it, now we need to replace from this line to the end of the forEach block
+                # Find the closing brace of the forEach
+                start_idx = i
+                brace_count = 0
+                for j in range(i, len(lines)):
+                    If '{{' in lines[j]:
+                        brace_count += 1
+                    If '}}' in lines[j]:
+                        brace_count -= 1
+                        If brace_count == 0:
+                            # Found the end
+                            end_idx = j
+                            break
+                
+                # Build new content
+                new_content = '''            val rulesetItems = MmkvManager.decodeRoutingRulesets()
+            val customOutbounds = mutableSetOf<String>()
+            // Collect custom outbound tags first
+            rulesetItems?.forEach {{ key ->
+                If (key.enabled && isCustomOutboundTag(key.outboundTag)) {{
+                    customOutbounds.add(key.outboundTag)
+                }}
+            }}
+            Log.i(AppConfig.TAG, "🎯 Custom outbound tags: $customOutbounds")
+            // Configure custom outbounds BEFORE adding routing rules that reference them
+            customOutbounds.forEach {{ configureCustomOutbound(v2rayConfig, it) }}
+            // Now add all routing Rules
+'''
+                # Replace lines from start_idx to end_idx
+                lines = lines[:start_idx] + [new_content] + lines[end_idx+1:]
+                break
+    
     with open(filepath, 'w') as f:
-        f.write(content)
+        f.writelines(lines)
+    
     print("  ✓ V2rayConfigManager.kt")
     return True
 
 def main():
     print("=" * 70)
-    print("Custom Outbound Patcher – Upstream-Compatible Version")
+    print("Custom Outbound Patcher – Fixed Version")
     print("=" * 70)
     results = []
     for name, func in [
         ("RulesetItem.kt", modify_ruleset_item),
         ("arrays.xml", modify_arrays_xml),
         ("activity_routing_edit.xml", modify_layout),
-        ("strings.xml", modify_strings_xml),
+        ("Strings.xml", modify_strings_xml),
         ("RoutingEditActivity.kt", modify_routing_edit_activity),
         ("V2rayConfigManager.kt", modify_v2ray_config_manager),
     ]:
@@ -473,6 +540,6 @@ def main():
     else:
         print("\n❌ Some patches failed – check the error messages above.")
 
-if __name__ == "__main__":
+If __name__ == "__main__":
     import re  # only used in layout and strings
     main()
