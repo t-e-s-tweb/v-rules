@@ -47,7 +47,8 @@ def modify_layout():
     if not os.path.exists(filepath):
         return False
     with open(filepath, 'r') as f:
-        content = f.read()    if 'android:id="@+id/layout_custom_outbound"' in content:
+        content = f.read()    
+        if 'android:id="@+id/layout_custom_outbound"' in content:
         print("  ✓ activity_routing_edit.xml (already patched)")
         return True
     m = re.search(r'android:entries="@array/outbound_tag" />', content)
