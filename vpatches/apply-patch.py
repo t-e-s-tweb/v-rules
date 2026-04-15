@@ -42,51 +42,72 @@ def modify_arrays_xml():
     print("  ✓ arrays.xml")
     return True
 
+
 def modify_layout():
     filepath = "V2rayNG/app/src/main/res/layout/activity_routing_edit.xml"
     if not os.path.exists(filepath):
         return False
+    
+    # Simple approach: just check if already patched
     with open(filepath, 'r') as f:
         content = f.read()
+    
     if 'android:id="@+id/layout_custom_outbound"' in content:
         print("  ✓ activity_routing_edit.xml (already patched)")
         return True
-    m = re.search(r'android:entries="@array/outbound_tag" />', content)
-    if not m:
+    
+    # Find the spinner entry and add layout after it
+    spinner_marker = 'android:entries="@array/outbound_tag" />'
+    if spinner_marker not in content:
         print("  ✗ Could not find spinner in layout")
         return False
-    after = content[m.end():]
-    cm = re.search(r'(\s*)</LinearLayout>', after)
-    If not cm:
+    
+    # Find position to insert (after the of spinner)
+    pos = content.find(spinner_marker)
+    if pos == -1:
+        print("  ✗ Could not find insertion point")
+        return False
+    
+    # Find end of LinearLayout tag after spinner
+    layout_end = content.find('</LinearLayout>', pos)
+    if layout_end == -1:
         print("  ✗ Could not find parent LinearLayout closing tag")
         return False
-    indent = cm.group(1)
-    insert_at = m.end() + cm.start()
-    end_at = insert_at + len(cm.group(0))
-    new_layout = f'''{indent}
-{indent}<LinearLayout
-{indent}    android:id="@+id/layout_custom_outbound"
-{indent}    android:layout_width="match_parent"
-{indent}    android:layout_height="wrap_content"
-{indent}    android:layout_marginTop="@dimen/padding_spacing_dp16"
-{indent}    android:orientation="vertical"
-{indent}    android:visibility="gone">
-{indent}    <TextView
-{indent}        android:layout_width="wrap_content"
-{indent}        android:layout_height="wrap_content"
-{indent}        android:text="@string/routing_settings_custom_outbound_tag" />
-{indent}    <EditText
-{indent}        android:id="@+id/et_custom_outbound_tag"
-{indent}        android:layout_width="match_parent"
-{indent}        android:layout_height="wrap_content"
-{indent}        android:inputType="text"
-{indent}        android:hint="@string/routing_settings_custom_outbound_hint" />
-{indent}</LinearLayout>'''
-    content = content[:end_at] + new_layout + content[end_at:]
+    
+    # Build new layout XML - simple string concatenation
+    indent = "    "
+    new_layout = (
+        '\n' + indent + '<LinearLayout\n' +
+        indent + '    android:id="@+id/layout_custom_outbound"\n' +
+        indent + '    android:layout_width="match_parent"\n' +
+        indent + '    android:layout_height="wrap_content"\n' +
+        indent + '    android:layout_marginTop="@dimen/padding_spacing_dp16"\n' +
+        indent + '    android:orientation="vertical"\n' +
+        indent + '    android:visibility="gone">\n' +
+        indent + '    <TextView\n' +
+        indent + '        android:layout_width="wrap_content"\n' +
+        indent + '        android:layout_height="wrap_content"\n' +
+        indent + '        android:text="@string/routing_settings_custom_outbound_tag" />\n' +
+        indent + '    <EditText\n' +
+        indent + '        android:id="@+id/et_custom_outbound_tag"\n' +
+        indent + '        android:layout_width="match_parent"\n' +
+        indent + '        android:layout_height="wrap_content"\n' +
+        indent + '        android:inputType="text"\n' +
+        indent + '        android:hint="@string/routing_settings_custom_outbound_hint" />\n' +
+        indent + '</LinearLayout>'
+    )
+    
+    # Insert the new layout
+    insert_pos = layout_end + len('</LinearLayout>')
+    new_content = content[:insert_pos] + new_layout + content[insert_pos:]
+    
     with open(filepath, 'w') as f:
-        f.write(content)
+        f.write(new_content)
+    
     print("  ✓ activity_routing_edit.xml")
     return True
+
+# ... rest of functions remain the same ...
 
 def modify_strings_xml():
     filepath = "V2rayNG/app/src/main/res/values/strings.xml"
