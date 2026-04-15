@@ -47,8 +47,7 @@ def modify_layout():
     if not os.path.exists(filepath):
         return False
     with open(filepath, 'r') as f:
-        content = f.read()    
-        if 'android:id="@+id/layout_custom_outbound"' in content:
+        content = f.read()    if 'android:id="@+id/layout_custom_outbound"' in content:
         print("  ✓ activity_routing_edit.xml (already patched)")
         return True
     m = re.search(r'android:entries="@array/outbound_tag" />', content)
@@ -123,17 +122,19 @@ def modify_routing_edit_activity():
     with open(filepath, 'r') as f:
         content = f.read()
 
-    # Check if already patched (look for key indicators)
     if "CUSTOM_OUTBOUND_INDEX = 3" in content and "binding.layoutCustomOutbound.visibility" in content:
         print("  ✓ RoutingEditActivity.kt (already patched)")
         return True
 
-    # ---- 1. Add import (only if not already present) ----
+    # ---- 1. Add import (check if exists first) ----
     if "import com.v2ray.ang.extension.isNotNullEmpty" not in content:
-        content = content.replace(
-            'import com.v2ray.ang.extension.nullIfBlank',
-            'import com.v2ray.ang.extension.nullIfBlank\nimport com.v2ray.ang.extension.isNotNullEmpty'
-        )
+        if "import com.v2ray.ang.extension.nullIfBlank" in content:
+            content = content.replace(
+                'import com.v2ray.ang.extension.nullIfBlank',
+                'import com.v2ray.ang.extension.nullIfBlank\nimport com.v2ray.ang.extension.isNotNullEmpty'
+            )
+        else:
+            print("  ⚠ nullIfBlank import not found, skipping isNotNullEmpty import")
 
     # ---- 2. Add constant CUSTOM_OUTBOUND_INDEX ----
     if "CUSTOM_OUTBOUND_INDEX = 3" not in content:
@@ -144,12 +145,12 @@ def modify_routing_edit_activity():
         resources.getStringArray(R.array.outbound_tag)
     }
     // Index of "custom" in the outbound_tag array (proxy=0, direct=1, block=2, custom=3)
-    private val CUSTOM_OUTBOUND_INDEX = 3'''
-        if old_const not in content:
-            print("  ✗ Could not find outbound_tag declaration")            return False
+    private val CUSTOM_OUTBOUND_INDEX = 3'''        if old_const not in content:
+            print("  ✗ Could not find outbound_tag declaration")
+            return False
         content = content.replace(old_const, new_const)
 
-    # ---- 3. Replace bindingServer (UPDATED: includes etProcess field) ----
+    # ---- 3. Replace bindingServer (Includes etProcess fix) ----
     old_binding = '''    private fun bindingServer(rulesetItem: RulesetItem): Boolean {
         binding.etRemarks.text = Utils.getEditable(rulesetItem.remarks)
         binding.chkLocked.isChecked = rulesetItem.locked == true
@@ -193,9 +194,9 @@ def modify_routing_edit_activity():
             binding.etCustomOutboundTag.text = Utils.getEditable(rulesetItem.customOutboundTag)
         }
 
-        return true
-    }'''
-    if old_binding not in content:        print("  ✗ Could not find original bindingServer function")
+        return true    }'''
+    if old_binding not in content:
+        print("  ✗ Could not find original bindingServer function")
         return False
     content = content.replace(old_binding, new_binding)
 
@@ -227,9 +228,8 @@ def modify_routing_edit_activity():
             return False
         content = content.replace(old_save, new_save)
 
-    # ---- 6. Insert spinner listener INSIDE onCreate using exact anchor ----
+    # ---- 6. Insert spinner listener INSIDE onCreate ----
     if "binding.spOutboundTag.onItemSelectedListener" not in content:
-        # Find the exact end of onCreate: "        }\n    }"
         old_end = '        }\n    }'
         if old_end not in content:
             print("  ✗ Could not find end of onCreate")
@@ -243,8 +243,8 @@ def modify_routing_edit_activity():
             }
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
-    }'''
-        content = content.replace(old_end, listener)
+    }'''        content = content.replace(old_end, listener)
+
     with open(filepath, 'w') as f:
         f.write(content)
     print("  ✓ RoutingEditActivity.kt")
@@ -257,13 +257,12 @@ def modify_v2ray_config_manager():
     with open(filepath, 'r') as f:
         content = f.read()
 
-    # ---- Guard: skip if already fully patched ----
     if "private fun configureCustomOutbound" in content:
         print("  ✓ V2rayConfigManager.kt (already patched)")
         return True
 
     # ------------------------------------------------------------------
-    # 1. Patch getUserRule2Domain – exact string match
+    # 1. Patch getUserRule2Domain – skip custom outbounds
     # ------------------------------------------------------------------
     old_getUserRule = '        if (key.enabled && key.outboundTag == tag && !key.domain.isNullOrEmpty()) {'
     new_getUserRule = '''        if (key.enabled && key.outboundTag == tag && !key.domain.isNullOrEmpty()) {
@@ -275,7 +274,7 @@ def modify_v2ray_config_manager():
     content = content.replace(old_getUserRule, new_getUserRule, 1)
 
     # ------------------------------------------------------------------
-    # 2. Insert isCustomOutboundTag – exact anchor
+    # 2. Insert isCustomOutboundTag
     # ------------------------------------------------------------------
     old_anchor = '''        return domain
     }
@@ -286,123 +285,112 @@ def modify_v2ray_config_manager():
 
     /**
      * Checks if an outbound tag is a custom (user-defined) outbound.
-     * Custom outbounds are those that don't match the standard tags (proxy, direct, block).
-     *
-     * @param tag The outbound tag to check
-     * @return true if the tag is custom, false otherwise
      */
     private fun isCustomOutboundTag(tag: String): Boolean {
         return tag != AppConfig.TAG_PROXY && tag != AppConfig.TAG_DIRECT && tag != AppConfig.TAG_BLOCKED
     }
+
     /**'''
     if old_anchor not in content:
-        print("  ✗ Failed to insert isCustomOutboundTag – anchor not found")
-        return False
+        print("  ✗ Failed to insert isCustomOutboundTag – anchor not found")        return False
     content = content.replace(old_anchor, new_anchor, 1)
 
     # ------------------------------------------------------------------
     # 3. Insert configureCustomOutbound + setupChainProxyForOutbound
-    #    Insert BEFORE the line 'private fun getMoreOutbounds('
     # ------------------------------------------------------------------
     insert_before = '    private fun getMoreOutbounds('
     if insert_before not in content:
         print("  ✗ Failed to find getMoreOutbounds anchor")
         return False
 
-    # Get the indentation of the anchor line
     lines = content.split('\n')
     for i, line in enumerate(lines):
         if line.strip().startswith('private fun getMoreOutbounds('):
-            indent = line[:len(line) - len(line.lstrip())]
-            new_methods = f'''
+            new_methods = '''
     /**
      * Configures a custom outbound with chain proxy support.
-     * Adds the outbound at the beginning of the list (index 0) so it's defined before routing rules.
      */
-    private fun configureCustomOutbound(v2rayConfig: V2rayConfig, customOutboundTag: String): Boolean {{
-        try {{
-            Log.i(AppConfig.TAG, "▶️ configureCustomOutbound: $customOutboundTag")
+    private fun configureCustomOutbound(v2rayConfig: V2rayConfig, customOutboundTag: String): Boolean {
+        try {
+            LogUtil.i(AppConfig.TAG, "▶️ configureCustomOutbound: $customOutboundTag")
             val profile = SettingsManager.getServerViaRemarks(customOutboundTag)
-            if (profile == null) {{
-                Log.i(AppConfig.TAG, "❌ No profile with remarks '$customOutboundTag'")
+            if (profile == null) {
+                LogUtil.i(AppConfig.TAG, "❌ No profile with remarks '$customOutboundTag'")
                 return false
-            }}
-            if (profile.configType == EConfigType.POLICYGROUP) {{
-                Log.i(AppConfig.TAG, "❌ Policy groups not supported")
+            }
+            if (profile.configType == EConfigType.POLICYGROUP) {
+                LogUtil.i(AppConfig.TAG, "❌ Policy groups not supported")
                 return false
-            }}
-            val outbound = convertProfile2Outbound(profile) ?: run {{
-                Log.i(AppConfig.TAG, "❌ convertProfile2Outbound failed (type: ${{profile.configType}})")
+            }
+            val outbound = convertProfile2Outbound(profile) ?: run {
+                LogUtil.i(AppConfig.TAG, "❌ convertProfile2Outbound failed (type: ${profile.configType})")
                 return false
-            }}
-            if (!updateOutboundWithGlobalSettings(outbound)) {{
-                Log.i(AppConfig.TAG, "❌ updateOutboundWithGlobalSettings failed")
+            }
+            if (!updateOutboundWithGlobalSettings(outbound)) {
+                LogUtil.i(AppConfig.TAG, "❌ updateOutboundWithGlobalSettings failed")
                 return false
-            }}
+            }
             outbound.tag = customOutboundTag
 
-            // Add at the beginning of outbounds list so it's available for routing rules
-            if (v2rayConfig.outbounds.none {{ it.tag == customOutboundTag }}) {{                v2rayConfig.outbounds.add(0, outbound)
-                Log.i(AppConfig.TAG, "✅ Custom outbound added at index 0: $customOutboundTag")
-            }} else {{
-                Log.i(AppConfig.TAG, "ℹ️ Custom outbound already exists: $customOutboundTag")
-            }}
+            // Add at the beginning of outbounds list
+            if (v2rayConfig.outbounds.none { it.tag == customOutboundTag }) {
+                v2rayConfig.outbounds.add(0, outbound)
+                LogUtil.i(AppConfig.TAG, "✅ Custom outbound added at index 0: $customOutboundTag")
+            } else {
+                LogUtil.i(AppConfig.TAG, "ℹ️ Custom outbound already exists: $customOutboundTag")
+            }
 
-            if (!profile.subscriptionId.isNullOrEmpty()) {{
-                setupChainProxyForOutbound(v2rayConfig, outbound, profile.subscriptionId)
-            }}
+            if (!profile.subscriptionId.isNullOrEmpty()) {
+                setupChainProxyForOutbound(v2rayConfig, outbound, profile.subscriptionId)            }
             return true
-        }} catch (e: Exception) {{
-            Log.e(AppConfig.TAG, "❌ Exception in configureCustomOutbound", e)
+        } catch (e: Exception) {
+            LogUtil.e(AppConfig.TAG, "❌ Exception in configureCustomOutbound", e)
             return false
-        }}
-    }}
+        }
+    }
 
     /**
      * Sets up chain proxy (prev/next) for a custom outbound.
      */
-    private fun setupChainProxyForOutbound(v2rayConfig: V2rayConfig, outbound: V2rayConfig.OutboundBean, subscriptionId: String) {{
+    private fun setupChainProxyForOutbound(v2rayConfig: V2rayConfig, outbound: V2rayConfig.OutboundBean, subscriptionId: String) {
         if (subscriptionId.isEmpty()) return
-        try {{
+        try {
             val subItem = MmkvManager.decodeSubscription(subscriptionId) ?: return
             val prevNode = SettingsManager.getServerViaRemarks(subItem.prevProfile)
-            if (prevNode != null) {{
-                convertProfile2Outbound(prevNode)?.let {{ prevOutbound ->
+            if (prevNode != null) {
+                convertProfile2Outbound(prevNode)?.let { prevOutbound ->
                     updateOutboundWithGlobalSettings(prevOutbound)
-                    prevOutbound.tag = "${{outbound.tag}}-prev"
+                    prevOutbound.tag = "${outbound.tag}-prev"
                     v2rayConfig.outbounds.add(prevOutbound)
                     outbound.ensureSockopt().dialerProxy = prevOutbound.tag
-                    Log.i(AppConfig.TAG, "🔗 Prev chain added for ${{outbound.tag}}")
-                }}
-            }}
+                    LogUtil.i(AppConfig.TAG, "🔗 Prev chain added for ${outbound.tag}")
+                }
+            }
             val nextNode = SettingsManager.getServerViaRemarks(subItem.nextProfile)
-            if (nextNode != null) {{
-                convertProfile2Outbound(nextNode)?.let {{ nextOutbound ->
+            if (nextNode != null) {
+                convertProfile2Outbound(nextNode)?.let { nextOutbound ->
                     updateOutboundWithGlobalSettings(nextOutbound)
-                    nextOutbound.tag = "${{outbound.tag}}-next"
+                    nextOutbound.tag = "${outbound.tag}-next"
                     v2rayConfig.outbounds.add(0, nextOutbound)
                     val originalTag = outbound.tag
-                    outbound.tag = "${{originalTag}}-orig"
+                    outbound.tag = "${originalTag}-orig"
                     nextOutbound.ensureSockopt().dialerProxy = outbound.tag
-                    Log.i(AppConfig.TAG, "🔗 Next chain added for ${{outbound.tag}}")
-                }}
-            }}
-        }} catch (e: Exception) {{
-            Log.e(AppConfig.TAG, "❌ Chain proxy failed", e)
-        }}
-    }}
-'''            lines.insert(i, new_methods)
+                    LogUtil.i(AppConfig.TAG, "🔗 Next chain added for ${outbound.tag}")
+                }
+            }
+        } catch (e: Exception) {
+            LogUtil.e(AppConfig.TAG, "❌ Chain proxy failed", e)
+        }
+    }
+'''
+            lines.insert(i, new_methods)
             content = '\n'.join(lines)
             print("  ✓ Inserted custom outbound methods before getMoreOutbounds")
             break
-    else:
-        print("  ✗ Failed to insert custom outbound methods – anchor line not found")
-        return False
 
     # ------------------------------------------------------------------
-    # 4. Patch getRouting – UPDATED: includes context parameter
-    # ------------------------------------------------------------------
-    old_getRouting = '''            val rulesetItems = MmkvManager.decodeRoutingRulesets()
+    # 4. Patch getRouting – (Includes 'context' parameter fix)
+    # ------------------------------------------------------------------    old_getRouting = '''            val rulesetItems = MmkvManager.decodeRoutingRulesets()
             rulesetItems?.forEach { key ->
                 getRoutingUserRule(context, key, v2rayConfig)'''
     new_getRouting = '''            val rulesetItems = MmkvManager.decodeRoutingRulesets()
@@ -412,7 +400,7 @@ def modify_v2ray_config_manager():
                     customOutbounds.add(key.outboundTag)
                 }
             }
-            Log.i(AppConfig.TAG, "🎯 Custom outbound tags: $customOutbounds")
+            LogUtil.i(AppConfig.TAG, "🎯 Custom outbound tags: $customOutbounds")
             // Configure custom outbounds BEFORE adding routing rules that reference them
             customOutbounds.forEach { configureCustomOutbound(v2rayConfig, it) }
             // Now add all routing rules
@@ -430,7 +418,7 @@ def modify_v2ray_config_manager():
 
 def main():
     print("=" * 70)
-    print("Custom Outbound Patcher – Exact String Replacements (FIXED)")
+    print("Custom Outbound Patcher – Fixed")
     print("=" * 70)
     results = []
     for name, func in [
@@ -440,7 +428,8 @@ def main():
         ("strings.xml", modify_strings_xml),
         ("RoutingEditActivity.kt", modify_routing_edit_activity),
         ("V2rayConfigManager.kt", modify_v2ray_config_manager),
-    ]:        try:
+    ]:
+        try:
             ok = func()
             results.append((name, ok))
         except Exception as e:
@@ -450,15 +439,8 @@ def main():
     success = sum(1 for _, ok in results if ok)
     print(f"\n✅ {success}/{len(results)} files patched successfully.")
     if success == len(results):
-        print("\n👉 Rebuild the app and test a routing rule with 'custom' outbound.")
-        print("   - When creating a new rule, the spinner defaults to 'proxy'.")
-        print("   - Select 'custom' from the spinner – the custom input field appears.")
-        print("   - Type the EXACT remark of an existing server and save.")
-        print("\n📱 Check logcat (filter 'v2rayNG') to confirm:")
-        print('   adb logcat -s v2rayNG')
-        print("   You should see: 🎯 Custom outbound tags: [...] ✅ Custom outbound added at index 0: ...")
-    else:
-        print("\n❌ Some patches failed – check the error messages above.")
+        print("\n👉 Rebuild the app and test.")    else:
+        print("\n❌ Some patches failed.")
 
 if __name__ == "__main__":
     main()
