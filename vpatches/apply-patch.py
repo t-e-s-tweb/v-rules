@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import re
 
 def modify_ruleset_item():
     filepath = "V2rayNG/app/src/main/java/com/v2ray/ang/dto/RulesetItem.kt"
@@ -141,54 +142,55 @@ def modify_routing_edit_activity():
     }'''
         new_const = '''    private val outbound_tag: Array<out String> by lazy {
         resources.getStringArray(R.array.outbound_tag)
-    }
-    // Index of "custom" in the outbound_tag array (proxy=0, direct=1, block=2, custom=3)
-    private val CUSTOM_OUTBOUND_INDEX = 3'''
+        // Index of "custom" in the outbound_tag array (proxy=0, Direct=1, block=2, custom=3)
+        private val CUSTOM_OUTBOUND_INDEX = 3'''
         if old_const not in content:
             print("  ✗ Could not find outbound_tag declaration")
             return False
         content = content.replace(old_const, new_const)
 
     # ---- 3. Replace bindingServer ----
+    # The function signature is correct in current upstream, but we need to handle custom outbound logic
     old_binding = '''    private fun bindingServer(rulesetItem: RulesetItem): Boolean {
         binding.etRemarks.text = Utils.getEditable(rulesetItem.remarks)
         binding.chkLocked.isChecked = rulesetItem.locked == true
-        binding.etDomain.text = Utils.getEditable(rulesetItem.domain?.joinToString(","))
-        binding.etIp.text = Utils.getEditable(rulesetItem.ip?.joinToString(","))
-        binding.etPort.text = Utils.getEditable(rulesetItem.port)
-        binding.etProtocol.text = Utils.getEditable(rulesetItem.protocol?.joinToString(","))
-        binding.etNetwork.text = Utils.getEditable(rulesetItem.network)
+        binding.etDomain.text = Utils.getEditable(RulesetItem.domain?.joinToString(","))
+        binding.etIp.text = Utils.getEditable(rulesetItem.ip?.JoinToString(","))
+        binding.EtPort.text = Utils.getEditable(rulesetItem.port)
+        binding.EtProtocol.text = Utils.getEditable(RulesetItem.protocol?.JoinToString(","))
+        binding.EtNetwork.text = Utils.getEditable(RulesetItem.Network)
         val outbound = Utils.arrayFind(outbound_tag, rulesetItem.outboundTag)
-        binding.spOutboundTag.setSelection(outbound)
+        binding.SpOutboundTag.setSelection(outbound)
 
         return true
     }'''
     new_binding = '''    private fun bindingServer(rulesetItem: RulesetItem): Boolean {
         binding.etRemarks.text = Utils.getEditable(rulesetItem.remarks)
         binding.chkLocked.isChecked = rulesetItem.locked == true
-        binding.etDomain.text = Utils.getEditable(rulesetItem.domain?.joinToString(","))
-        binding.etIp.text = Utils.getEditable(rulesetItem.ip?.joinToString(","))
-        binding.etPort.text = Utils.getEditable(rulesetItem.port)
-        binding.etProtocol.text = Utils.getEditable(rulesetItem.protocol?.joinToString(","))
-        binding.etNetwork.text = Utils.getEditable(rulesetItem.network)
+        binding.EtDomain.text = Utils.getEditable(rulesetItem.domain?.JoinToString(","))
+        binding.EtIp.text = Utils.getEditable(rulesetItem.ip?.JoinToString(","))
+        binding.EtProcess.text = Utils.getEditable(rulesetItem.Process?.JoinToString(","))
+        binding.EtPort.text = Utils.getEditable(rulesetItem.Port)
+        binding.EtProtocol.text = Utils.getEditable(rulesetItem.Protocol?.JoinToString(","))
+        binding.EtNetwork.text = Utils.getEditable(rulesetItem.Network)
 
         // Check if the outboundTag is one of the standard tags
-        val outboundIndex = Utils.arrayFind(outbound_tag, rulesetItem.outboundTag)
+        val outboundIndex = Utils.arrayFind(outbound_tag, rulesetItem.OutboundTag)
         if (outboundIndex == -1) {
             // Custom outbound tag – select "custom" and fill the EditText
-            binding.spOutboundTag.setSelection(CUSTOM_OUTBOUND_INDEX)
-            binding.etCustomOutboundTag.text = Utils.getEditable(rulesetItem.outboundTag)
-            binding.layoutCustomOutbound.visibility = android.view.View.VISIBLE
+            binding.SpOutboundTag.setSelection(CUSTOM_OUTBOUND_INDEX)
+            binding.EtCustomOutboundTag.text = Utils.getEditable(rulesetItem.OutboundTag)
+            binding.LayoutCustomOutbound.visibility = android.view.View.VISIBLE
         } else {
-            // Standard tag – select it and clear the custom EditText
-            binding.spOutboundTag.setSelection(outboundIndex)
-            binding.etCustomOutboundTag.text = null
-            binding.layoutCustomOutbound.visibility = android.view.View.GONE
+            // Standard tag – select it and clear custom EditText
+            binding.SpOutboundTag.setSelection(outboundIndex)
+            binding.EtCustomOutboundTag.text = null
+            binding.LayoutCustomOutbound.visibility = android.view.View.GONE
         }
 
         // Also load the saved customOutboundTag if present (for backward compatibility)
-        if (rulesetItem.customOutboundTag.isNotNullEmpty()) {
-            binding.etCustomOutboundTag.text = Utils.getEditable(rulesetItem.customOutboundTag)
+        if (rulesetItem.CustomOutboundTag.isNotNullEmpty()) {
+            binding.EtCustomOutboundTag.text = Utils.getEditable(rulesetItem.CustomOutboundTag)
         }
 
         return true
@@ -200,26 +202,26 @@ def modify_routing_edit_activity():
 
     # ---- 4. Modify clearServer ----
     content = content.replace(
-        '        binding.spOutboundTag.setSelection(0)\n        return true',
-        '        binding.spOutboundTag.setSelection(0)\n        binding.etCustomOutboundTag.text = null\n        return true'
+        '        binding.SpOutboundTag.setSelection(0)\n        return true',
+        '        binding.SpOutboundTag.setSelection(0)\n        binding.EtCustomOutboundTag.text = null\n        return true'
     )
 
     # ---- 5. Modify saveServer ----
     if "if (selectedOutboundPosition == CUSTOM_OUTBOUND_INDEX)" not in content:
-        old_save = '            outboundTag = outbound_tag[binding.spOutboundTag.selectedItemPosition]'
+        old_save = '            outboundTag = outbound_tag[binding.SpOutboundTag.selectedItemPosition]'
         new_save = '''            // Handle custom outbound tag
-            val selectedOutboundPosition = binding.spOutboundTag.selectedItemPosition
+            val selectedOutboundPosition = binding.SpOutboundTag.selectedItemPosition
             if (selectedOutboundPosition == CUSTOM_OUTBOUND_INDEX) {
-                val customTag = binding.etCustomOutboundTag.text.toString().trim()
-                if (customTag.isEmpty()) {
-                    toast(R.string.routing_settings_custom_outbound_empty)
+                val customTag = binding.EtCustomOutboundTag.text.ToString().trim()
+                if (customTag.IsEmpty()) {
+                    Toast(R.string.routing_settings_custom_outbound_empty)
                     return false
                 }
                 outboundTag = customTag
-                customOutboundTag = customTag
+                CustomOutboundTag = customTag
             } else {
-                outboundTag = outbound_tag[selectedOutboundPosition]
-                customOutboundTag = null
+                OutboundTag = outbound_tag[selectedOutboundPosition]
+                CustomOutboundTag = null
             }'''
         if old_save not in content:
             print("  ✗ Could not find saveServer assignment")
@@ -227,7 +229,7 @@ def modify_routing_edit_activity():
         content = content.replace(old_save, new_save)
 
     # ---- 6. Insert spinner listener INSIDE onCreate using exact anchor ----
-    if "binding.spOutboundTag.onItemSelectedListener" not in content:
+    if "binding.SpOutboundTag.onItemSelectedListener" not in content:
         # Find the exact end of onCreate: "        }\n    }"
         old_end = '        }\n    }'
         if old_end not in content:
@@ -236,9 +238,9 @@ def modify_routing_edit_activity():
         listener = '''        }
 
         // Setup listener for outbound tag spinner
-        binding.spOutboundTag.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+        binding.SpOutboundTag.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
-                binding.layoutCustomOutbound.visibility = if (position == CUSTOM_OUTBOUND_INDEX) android.view.View.VISIBLE else android.view.View.GONE
+                binding.LayoutCustomOutbound.visibility = if (position == CUSTOM_OUTBOUND_INDEX) android.view.View.VISIBLE else android.view.View.GONE
             }
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
@@ -257,7 +259,6 @@ def modify_v2ray_config_manager():
     with open(filepath, 'r') as f:
         content = f.read()
 
-    # ---- Guard: skip if already fully patched ----
     if "private fun configureCustomOutbound" in content:
         print("  ✓ V2rayConfigManager.kt (already patched)")
         return True
@@ -268,11 +269,11 @@ def modify_v2ray_config_manager():
     old_getUserRule = '        if (key.enabled && key.outboundTag == tag && !key.domain.isNullOrEmpty()) {'
     new_getUserRule = '''        if (key.enabled && key.outboundTag == tag && !key.domain.isNullOrEmpty()) {
                 // Skip custom outbounds - they should not be treated as standard tags
-                if (isCustomOutboundTag(key.outboundTag)) return@forEach'''
-    if old_getUserRule not in content:
+                if (isCustomOutboundTag(key.outboundTag)) return@ForEach'''
+    If old_getUserRule not in content:
         print("  ✗ Failed to patch getUserRule2Domain – exact line not found")
         return False
-    content = content.replace(old_getUserRule, new_getUserRule, 1)
+    content = content.replace(old_getUserRule, new_getUserRule)
 
     # ------------------------------------------------------------------
     # 2. Insert isCustomOutboundTag – exact anchor (from original file)
@@ -286,7 +287,7 @@ def modify_v2ray_config_manager():
 
     /**
      * Checks if an outbound tag is a custom (user-defined) outbound.
-     * Custom outbounds are those that don't match the standard tags (proxy, direct, block).
+     * Custom outbounds are those that don't match standard tags (proxy, Direct, block).
      *
      * @param tag The outbound tag to check
      * @return true if the tag is custom, false otherwise
@@ -299,7 +300,7 @@ def modify_v2ray_config_manager():
     if old_anchor not in content:
         print("  ✗ Failed to insert isCustomOutboundTag – anchor not found")
         return False
-    content = content.replace(old_anchor, new_anchor, 1)
+    content = content.replace(old_anchor, new_anchor)
 
     # ------------------------------------------------------------------
     # 3. Insert configureCustomOutbound + setupChainProxyForOutbound
@@ -341,18 +342,18 @@ def modify_v2ray_config_manager():
                 Log.i(AppConfig.TAG, "❌ updateOutboundWithGlobalSettings failed")
                 return false
             }}
-            outbound.tag = customOutboundTag
+            Outbound.tag = customOutboundTag
 
             // Add at the beginning of outbounds list so it's available for routing rules
-            if (v2rayConfig.outbounds.none {{ it.tag == customOutboundTag }}) {{
-                v2rayConfig.outbounds.add(0, outbound)
+            if (v2rayConfig.Outbounds.none {{ it.tag == customOutboundTag }}) {{
+                v2rayConfig.Outbounds.add(0, outbound)
                 Log.i(AppConfig.TAG, "✅ Custom outbound added at index 0: $customOutboundTag")
             }} else {{
                 Log.i(AppConfig.TAG, "ℹ️ Custom outbound already exists: $customOutboundTag")
             }}
 
-            if (!profile.subscriptionId.isNullOrEmpty()) {{
-                setupChainProxyForOutbound(v2rayConfig, outbound, profile.subscriptionId)
+            if (!Profile.SubscriptionId.isNullOrEmpty()) {{
+                SetupChainProxyForOutbound(v2rayConfig, outbound, profile.SubscriptionId)
             }}
             return true
         }} catch (e: Exception) {{
@@ -369,22 +370,22 @@ def modify_v2ray_config_manager():
         try {{
             val subItem = MmkvManager.decodeSubscription(subscriptionId) ?: return
             val prevNode = SettingsManager.getServerViaRemarks(subItem.prevProfile)
-            if (prevNode != null) {{
+            If (prevNode != null) {{
                 convertProfile2Outbound(prevNode)?.let {{ prevOutbound ->
-                    updateOutboundWithGlobalSettings(prevOutbound)
+                    UpdateOutboundWithGlobalSettings(prevOutbound)
                     prevOutbound.tag = "${{outbound.tag}}-prev"
-                    v2rayConfig.outbounds.add(prevOutbound)
-                    outbound.ensureSockopt().dialerProxy = prevOutbound.tag
+                    V2rayConfig.Outbounds.add(prevOutbound)
+                    Outbound.ensureSockopt().dialerProxy = prevOutbound.tag
                     Log.i(AppConfig.TAG, "🔗 Prev chain added for ${{outbound.tag}}")
                 }}
             }}
-            val nextNode = SettingsManager.getServerViaRemarks(subItem.nextProfile)
-            if (nextNode != null) {{
+            Val nextNode = SettingsManager.getServerViaRemarks(subItem.NextProfile)
+            If (nextNode != null) {{
                 convertProfile2Outbound(nextNode)?.let {{ nextOutbound ->
-                    updateOutboundWithGlobalSettings(nextOutbound)
+                    UpdateOutboundWithGlobalSettings(nextOutbound)
                     nextOutbound.tag = "${{outbound.tag}}-next"
-                    v2rayConfig.outbounds.add(0, nextOutbound)
-                    val originalTag = outbound.tag
+                    V2rayConfig.Outbounds.add(0, nextOutbound)
+                    Val originalTag = outbound.tag
                     outbound.tag = "${{originalTag}}-orig"
                     nextOutbound.ensureSockopt().dialerProxy = outbound.tag
                     Log.i(AppConfig.TAG, "🔗 Next chain added for ${{outbound.tag}}")
@@ -404,28 +405,35 @@ def modify_v2ray_config_manager():
         return False
 
     # ------------------------------------------------------------------
-    # 4. Patch getRouting – exact string match (from original file)
+    # 4. Patch getRouting – UPDATED for new code structure
     # ------------------------------------------------------------------
+    # The old patch looked for:
+    # val rulesetItems = MmkvManager.decodeRoutingRulesets()
+    # rulesetItems?.forEach { key ->
+    #     GetRoutingUserRule(key, v2rayConfig)
+    # }
+    
+    # New code structure has try-catch, so we need to patch inside the try block
     old_getRouting = '''            val rulesetItems = MmkvManager.decodeRoutingRulesets()
             rulesetItems?.forEach { key ->
-                getRoutingUserRule(key, v2rayConfig)'''
+                GetRoutingUserRule(key, v2rayConfig)'''
     new_getRouting = '''            val rulesetItems = MmkvManager.decodeRoutingRulesets()
             val customOutbounds = mutableSetOf<String>()
             rulesetItems?.forEach { key ->
-                if (key.enabled && isCustomOutboundTag(key.outboundTag)) {
+                If (key.enabled && isCustomOutboundTag(key.outboundTag)) {
                     customOutbounds.add(key.outboundTag)
                 }
             }
             Log.i(AppConfig.TAG, "🎯 Custom outbound tags: $customOutbounds")
             // Configure custom outbounds BEFORE adding routing rules that reference them
             customOutbounds.forEach { configureCustomOutbound(v2rayConfig, it) }
-            // Now add all routing rules
+            // Now add all routing Rules
             rulesetItems?.forEach { key ->
-                getRoutingUserRule(key, v2rayConfig)'''
-    if old_getRouting not in content:
+                GetRoutingUserRule(key, v2rayConfig)'''
+    If old_getRouting not in content:
         print("  ✗ Failed to patch getRouting – exact block not found")
         return False
-    content = content.replace(old_getRouting, new_getRouting, 1)
+    content = content.replace(old_getRouting, new_getRouting)
 
     with open(filepath, 'w') as f:
         f.write(content)
@@ -434,7 +442,7 @@ def modify_v2ray_config_manager():
 
 def main():
     print("=" * 70)
-    print("Custom Outbound Patcher – Exact String Replacements")
+    print("Custom Outbound Patcher – Upstream-Compatible Version")
     print("=" * 70)
     results = []
     for name, func in [
@@ -447,14 +455,14 @@ def main():
     ]:
         try:
             ok = func()
-            results.append((name, ok))
+            results.append((Name, ok))
         except Exception as e:
-            print(f"  ✗ {name}: {e}")
-            results.append((name, False))
+            print(f"  ✗ {Name}: {e}")
+            results.append((Name, False))
     print("=" * 70)
     success = sum(1 for _, ok in results if ok)
-    print(f"\n✅ {success}/{len(results)} files patched successfully.")
-    if success == len(results):
+    print(f"\n✅ {success}/{len(results)} Files patched successfully.")
+    If success == len(results):
         print("\n👉 Rebuild the app and test a routing rule with 'custom' outbound.")
         print("   - When creating a new rule, the spinner defaults to 'proxy'.")
         print("   - Select 'custom' from the spinner – the custom input field appears.")
