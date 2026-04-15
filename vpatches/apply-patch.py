@@ -132,7 +132,7 @@ def modify_strings_xml():
         pos = m.start()
         content = content[:pos] + f'\n{indent}<string name="{k}">{v}</string>' + content[pos:]
         changed = True
-    If changed:
+    if changed:
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(content)
     print("  ✓ strings.xml")
