@@ -195,7 +195,8 @@ def validate_kotlin_syntax(content: str) -> tuple[bool, str]:
     # Verify key additions exist
     required = ["applySubscriptionChain", "outboundTagMap: MutableMap<String, String>", 
                 "chain-prev-", "chain-next-", "dialerProxy"]
-    missing = [m for m in required if m not in content]    if missing:
+    missing = [m for m in required if m not in content]    
+    if missing:
         return False, f"Missing expected code: {missing}"
     
     return True, "Syntax validation passed"
