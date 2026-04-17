@@ -245,7 +245,8 @@ def patch_file(filepath: Path) -> bool:
         shutil.copy2(backup, filepath)
         return False
     
-    print("\n" + "="*60)    print("✅ Patch applied successfully!")
+    print("\n" + "="*60)    
+    print("✅ Patch applied successfully!")
     print("="*60)
     print("\nWhat was added:")
     print("  • injectCustomOutbounds() accepts outboundTagMap for deduplication")
