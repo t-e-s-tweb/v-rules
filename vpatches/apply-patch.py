@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Patches V2rayConfigManager.kt with subscription chaining (prev/next proxy) + deduplication.
-Uses reliable insertion points from the working custom-outbound script.
+Uses regex for flexible matching.
 """
 
 import re
@@ -26,13 +26,12 @@ def patch_file(filepath: Path) -> bool:
     # --- 1. Add import for ensureSockopt if missing ---
     import_line = "import com.v2ray.ang.extension.ensureSockopt"
     if import_line not in content:
-        # Find a good place to insert (after other imports)
+        # Insert after other extension imports
         pattern = r'(import com\.v2ray\.ang\.extension\..*\n)'
         match = re.search(pattern, content)
         if match:
-            insert_pos = match.end()
-            content = content[:insert_pos] + import_line + "\n" + content[insert_pos:]
-            print("  Added import ensureSockopt")
+            content = content[:match.end()] + import_line + "\n" + content[match.end():]
+            print("  ✓ Added import ensureSockopt")
         else:
             print("  ⚠ Could not find import block; ensureSockopt may already be resolved")
 
@@ -41,42 +40,51 @@ def patch_file(filepath: Path) -> bool:
     new_sig = "private fun injectCustomOutbounds(v2rayConfig: V2rayConfig, outboundTagMap: MutableMap<String, String> = mutableMapOf()) {"
     if old_sig in content:
         content = content.replace(old_sig, new_sig)
+        print("  ✓ Updated injectCustomOutbounds signature")
     else:
         print("  ✗ Could not find injectCustomOutbounds signature")
         return False
 
-    # --- 3. Replace tag assignment block inside injectCustomOutbounds ---
-    old_block = """            updateOutboundWithGlobalSettings(outbound)
-            outbound.tag = tag
-            v2rayConfig.outbounds.add(outbound)
-            existingTags.add(tag)
-            LogUtil.d(AppConfig.TAG, "Injected custom outbound: tag='$tag'")"""
-    new_block = """            updateOutboundWithGlobalSettings(outbound)
-            
-            // Generate unique tag for deduplication tracking
-            val injectedTag = if (tag in outboundTagMap) {
-                outboundTagMap[tag]!!
-            } else {
-                val newTag = "custom-${tag.hashCode().toString(16).take(8)}"
-                outboundTagMap[tag] = newTag
-                newTag
-            }
-            outbound.tag = injectedTag
-            
-            // Apply subscription chain (prev/next proxy) if applicable
-            applySubscriptionChain(v2rayConfig, profile, outbound, outboundTagMap, existingTags)
-            
-            v2rayConfig.outbounds.add(outbound)
-            existingTags.add(injectedTag)
-            LogUtil.d(AppConfig.TAG, "Injected custom outbound: tag='$injectedTag', original='$tag'")"""
-    if old_block in content:
-        content = content.replace(old_block, new_block)
-    else:
-        print("  ✗ Could not find outbound tag assignment block")
+    # --- 3. Replace tag assignment block using regex ---
+    # Pattern matches the four lines that set tag, add outbound, add tag to set, and log.
+    # We'll capture the indentation and replace with properly indented new block.
+    pattern = re.compile(
+        r'(\s*)updateOutboundWithGlobalSettings\(outbound\)\s*\n'
+        r'\s*outbound\.tag = tag\s*\n'
+        r'\s*v2rayConfig\.outbounds\.add\(outbound\)\s*\n'
+        r'\s*existingTags\.add\(tag\)\s*\n'
+        r'\s*LogUtil\.d\(AppConfig\.TAG, "Injected custom outbound: tag=\'\$tag\'"\)'
+    )
+    match = pattern.search(content)
+    if not match:
+        print("  ✗ Could not find outbound tag assignment block (tried regex)")
         return False
 
+    indent = match.group(1)  # preserve original indentation
+    new_block = f'''{indent}updateOutboundWithGlobalSettings(outbound)
+{indent}
+{indent}// Generate unique tag for deduplication tracking
+{indent}val injectedTag = if (tag in outboundTagMap) {{
+{indent}    outboundTagMap[tag]!!
+{indent}}} else {{
+{indent}    val newTag = "custom-${{tag.hashCode().toString(16).take(8)}}"
+{indent}    outboundTagMap[tag] = newTag
+{indent}    newTag
+{indent}}}
+{indent}outbound.tag = injectedTag
+{indent}
+{indent}// Apply subscription chain (prev/next proxy) if applicable
+{indent}applySubscriptionChain(v2rayConfig, profile, outbound, outboundTagMap, existingTags)
+{indent}
+{indent}v2rayConfig.outbounds.add(outbound)
+{indent}existingTags.add(injectedTag)
+{indent}LogUtil.d(AppConfig.TAG, "Injected custom outbound: tag='$injectedTag', original='$tag'")'''
+    
+    content = content[:match.start()] + new_block + content[match.end():]
+    print("  ✓ Replaced outbound tag assignment block")
+
     # --- 4. Insert applySubscriptionChain function before getRouting ---
-    routing_pattern = r'(\n\s*private fun getRouting\([^)]*\):)'
+    routing_pattern = re.compile(r'(\n\s*private fun getRouting\([^)]*\):)')
     match = re.search(routing_pattern, content)
     if not match:
         print("  ✗ Could not find getRouting function")
@@ -142,14 +150,15 @@ def patch_file(filepath: Path) -> bool:
     }
 '''
     content = content[:match.start()] + new_function + "\n" + content[match.start():]
-    print("  Inserted applySubscriptionChain")
+    print("  ✓ Inserted applySubscriptionChain function")
 
     # --- 5. Modify getRouting to create outboundTagMap and pass it ---
     old_call = "            injectCustomOutbounds(v2rayConfig)"
-    new_call = """            val outboundTagMap = mutableMapOf<String, String>()
-            injectCustomOutbounds(v2rayConfig, outboundTagMap)"""
+    new_call = '''            val outboundTagMap = mutableMapOf<String, String>()
+            injectCustomOutbounds(v2rayConfig, outboundTagMap)'''
     if old_call in content:
         content = content.replace(old_call, new_call)
+        print("  ✓ Updated getRouting call")
     else:
         print("  ✗ Could not find injectCustomOutbounds call in getRouting")
         return False
