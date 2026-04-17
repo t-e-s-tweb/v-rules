@@ -47,7 +47,8 @@ def modify_inject_custom_outbounds(content: str) -> str:
     new_sig = "private fun injectCustomOutbounds(v2rayConfig: V2rayConfig, outboundTagMap: MutableMap<String, String> = mutableMapOf()) {"
     content = content.replace(old_sig, new_sig)
     
-    # Replace tag assignment with deduplication + chain logic    old_tag_block = """            updateOutboundWithGlobalSettings(outbound)
+    # Replace tag assignment with deduplication + chain logic    
+    old_tag_block = """            updateOutboundWithGlobalSettings(outbound)
             outbound.tag = tag
             v2rayConfig.outbounds.add(outbound)
             existingTags.add(tag)
