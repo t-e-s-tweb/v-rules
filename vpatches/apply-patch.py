@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Patches V2rayConfigManager.kt with subscription chaining + deduplication.
-No fake imports – uses existing ensureSockopt extension.
+Preserves original custom outbound tag names.
 """
 
 import re
@@ -33,7 +33,7 @@ def patch_file(filepath: Path) -> bool:
         print("  ✗ Could not find injectCustomOutbounds signature")
         return False
 
-    # --- 2. Replace tag assignment block using regex (flexible whitespace) ---
+    # --- 2. Replace tag assignment block (preserve original tag) ---
     pattern = re.compile(
         r'(\s*)updateOutboundWithGlobalSettings\(outbound\)\s*\n'
         r'\s*outbound\.tag = tag\s*\n'
@@ -49,25 +49,23 @@ def patch_file(filepath: Path) -> bool:
     indent = match.group(1)
     new_block = f'''{indent}updateOutboundWithGlobalSettings(outbound)
 {indent}
-{indent}// Generate unique tag for deduplication tracking
-{indent}val injectedTag = if (tag in outboundTagMap) {{
-{indent}    outboundTagMap[tag]!!
-{indent}}} else {{
-{indent}    val newTag = "custom-${{tag.hashCode().toString(16).take(8)}}"
-{indent}    outboundTagMap[tag] = newTag
-{indent}    newTag
+{indent}// Deduplication: skip if this custom outbound has already been injected
+{indent}if (outboundTagMap.containsKey(tag)) {{
+{indent}    LogUtil.d(AppConfig.TAG, "Custom outbound '$tag' already injected, skipping")
+{indent}    return@forEach
 {indent}}}
-{indent}outbound.tag = injectedTag
+{indent}outbound.tag = tag
 {indent}
 {indent}// Apply subscription chain (prev/next proxy) if applicable
 {indent}applySubscriptionChain(v2rayConfig, profile, outbound, outboundTagMap, existingTags)
 {indent}
 {indent}v2rayConfig.outbounds.add(outbound)
-{indent}existingTags.add(injectedTag)
-{indent}LogUtil.d(AppConfig.TAG, "Injected custom outbound: tag='$injectedTag', original='$tag'")'''
+{indent}existingTags.add(tag)
+{indent}outboundTagMap[tag] = tag  // mark as processed
+{indent}LogUtil.d(AppConfig.TAG, "Injected custom outbound: tag='$tag'")'''
     
     content = content[:match.start()] + new_block + content[match.end():]
-    print("  ✓ Replaced outbound tag assignment block")
+    print("  ✓ Replaced outbound tag assignment block (preserves original tag)")
 
     # --- 3. Insert applySubscriptionChain function before getRouting ---
     routing_pattern = re.compile(r'(\n\s*private fun getRouting\([^)]*\):)')
