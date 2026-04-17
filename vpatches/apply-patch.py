@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-Patches V2rayConfigManager.kt with subscription chaining (prev/next).
-- Clean tag names: prev = tag-prev, next takes over original tag, original becomes tag-orig.
-- Next proxy appended (not inserted at 0) like previous proxy.
-- Deduplication prevents duplicate outbounds.
+Patches V2rayConfigManager.kt with subscription chaining for custom outbounds.
+Works with the actual code structure (as provided).
 """
 
 import re
@@ -25,50 +23,66 @@ def patch_file(filepath: Path) -> bool:
     print(f"Patching: {filepath}")
     content = filepath.read_text(encoding="utf-8")
 
-    # --- 1. Modify injectCustomOutbounds signature ---
-    old_sig = "private fun injectCustomOutbounds(v2rayConfig: V2rayConfig) {"
-    new_sig = "private fun injectCustomOutbounds(v2rayConfig: V2rayConfig, outboundTagMap: MutableMap<String, String> = mutableMapOf()) {"
-    if old_sig in content:
-        content = content.replace(old_sig, new_sig)
-        print("  ✓ Updated injectCustomOutbounds signature")
-    else:
-        print("  ✗ Could not find injectCustomOutbounds signature")
-        return False
-
-    # --- 2. Replace tag assignment block ---
-    pattern = re.compile(
-        r'(\s*)updateOutboundWithGlobalSettings\(outbound\)\s*\n'
-        r'\s*outbound\.tag = tag\s*\n'
-        r'\s*v2rayConfig\.outbounds\.add\(outbound\)\s*\n'
-        r'\s*existingTags\.add\(tag\)\s*\n'
-        r'\s*LogUtil\.d\(AppConfig\.TAG, "Injected custom outbound: tag=\'\$tag\'"\)'
+    # ------------------------------------------------------------------
+    # 1. Replace injectCustomOutbounds with new version (chain support)
+    # ------------------------------------------------------------------
+    old_func_pattern = re.compile(
+        r'(\s*)private fun injectCustomOutbounds\(v2rayConfig: V2rayConfig\) \{\n'
+        r'(.*?)\n\1\}',
+        re.DOTALL
     )
-    match = pattern.search(content)
+    match = old_func_pattern.search(content)
     if not match:
-        print("  ✗ Could not find outbound tag assignment block")
+        print("  ✗ Could not find injectCustomOutbounds function")
         return False
 
     indent = match.group(1)
-    new_block = f'''{indent}updateOutboundWithGlobalSettings(outbound)
+    new_func = f'''{indent}private fun injectCustomOutbounds(v2rayConfig: V2rayConfig, outboundTagMap: MutableMap<String, String> = mutableMapOf()) {{
+{indent}    val existingTags = v2rayConfig.outbounds.mapTo(mutableSetOf()) {{ it.tag }}
+{indent}    val rulesetItems = MmkvManager.decodeRoutingRulesets() ?: return
 {indent}
-{indent}// Deduplication: skip if this custom outbound has already been injected
-{indent}if (outboundTagMap.containsKey(tag)) {{
-{indent}    LogUtil.d(AppConfig.TAG, "Custom outbound '$tag' already injected, skipping")
-{indent}    return@forEach
-{indent}}}
-{indent}outbound.tag = tag
+{indent}    rulesetItems
+{indent}        .filter {{ it.enabled }}
+{indent}        .mapNotNull {{ it.outboundTag.takeIf {{ tag -> tag.isNotBlank() }} }}
+{indent}        .filter {{ it !in BUILTIN_OUTBOUND_TAGS }}
+{indent}        .distinct()
+{indent}        .forEach {{ tag ->
+{indent}            // Deduplication: skip if this custom outbound has already been injected
+{indent}            if (outboundTagMap.containsKey(tag)) {{
+{indent}                LogUtil.d(AppConfig.TAG, "Custom outbound '$tag' already injected, skipping")
+{indent}                return@forEach
+{indent}            }}
+{indent}            try {{
+{indent}                val profile = SettingsManager.getServerViaRemarks(tag) ?: run {{
+{indent}                    LogUtil.w(AppConfig.TAG, "Custom outbound tag '$tag' not found by remarks, skipping")
+{indent}                    return@forEach
+{indent}                }}
+{indent}                val outbound = convertProfile2Outbound(profile) ?: run {{
+{indent}                    LogUtil.w(AppConfig.TAG, "Could not convert profile '$tag' to outbound, skipping")
+{indent}                    return@forEach
+{indent}                }}
+{indent}                updateOutboundWithGlobalSettings(outbound)
+{indent}                outbound.tag = tag
 {indent}
-{indent}// Apply subscription chain (prev/next proxy) if applicable
-{indent}applySubscriptionChain(v2rayConfig, profile, outbound, outboundTagMap, existingTags)
+{indent}                // Apply subscription chain (prev/next proxy) if applicable
+{indent}                applySubscriptionChain(v2rayConfig, profile, outbound, outboundTagMap, existingTags)
 {indent}
-{indent}v2rayConfig.outbounds.add(outbound)
-{indent}existingTags.add(tag)
-{indent}outboundTagMap[tag] = tag
-{indent}LogUtil.d(AppConfig.TAG, "Injected custom outbound: tag='$tag'")'''
-    content = content[:match.start()] + new_block + content[match.end():]
-    print("  ✓ Replaced outbound tag assignment block")
+{indent}                v2rayConfig.outbounds.add(outbound)
+{indent}                existingTags.add(tag)
+{indent}                outboundTagMap[tag] = tag
+{indent}                LogUtil.d(AppConfig.TAG, "Injected custom outbound: tag='$tag'")
+{indent}            }} catch (e: Exception) {{
+{indent}                LogUtil.e(AppConfig.TAG, "Failed to inject custom outbound for tag '$tag', skipping", e)
+{indent}            }}
+{indent}        }}
+{indent}}}'''
 
-    # --- 3. Insert applySubscriptionChain function (next appended) ---
+    content = content[:match.start()] + new_func + content[match.end():]
+    print("  ✓ Replaced injectCustomOutbounds with chain-enabled version")
+
+    # ------------------------------------------------------------------
+    # 2. Insert applySubscriptionChain before getRouting
+    # ------------------------------------------------------------------
     routing_pattern = re.compile(r'(\n\s*private fun getRouting\([^)]*\):)')
     match = re.search(routing_pattern, content)
     if not match:
@@ -132,7 +146,7 @@ def patch_file(filepath: Path) -> bool:
             outboundTagMap[mapKey] = desiredTag
             
             chainTo(chainOutbound)
-            v2rayConfig.outbounds.add(chainOutbound)  // APPEND, not insert at 0
+            v2rayConfig.outbounds.add(chainOutbound)
             existingTags.add(desiredTag)
             LogUtil.d(AppConfig.TAG, "Created $chainType outbound: $desiredTag")
         }
@@ -149,15 +163,16 @@ def patch_file(filepath: Path) -> bool:
             
             addChainOutbound(subItem.nextProfile, "next", originalTag) { nextOutbound ->
                 nextOutbound.ensureSockopt().dialerProxy = newOriginalTag
-                // nextOutbound is already appended via addChainOutbound's add()
             }
         }
     }
 '''
     content = content[:match.start()] + new_function + "\n" + content[match.start():]
-    print("  ✓ Inserted applySubscriptionChain function (next appended)")
+    print("  ✓ Inserted applySubscriptionChain function")
 
-    # --- 4. Modify getRouting call ---
+    # ------------------------------------------------------------------
+    # 3. Modify getRouting to create outboundTagMap and pass it
+    # ------------------------------------------------------------------
     old_call = "            injectCustomOutbounds(v2rayConfig)"
     new_call = '''            val outboundTagMap = mutableMapOf<String, String>()
             injectCustomOutbounds(v2rayConfig, outboundTagMap)'''
@@ -183,7 +198,7 @@ def main():
         sys.exit(1)
     create_backup(target)
     if patch_file(target):
-        print("\n👉 Rebuild and test. Both prev and next proxies are now appended.")
+        print("\n👉 Rebuild and test subscription chaining for custom outbounds.")
     else:
         print("\n❌ Patching failed. Restore from backup.")
 
