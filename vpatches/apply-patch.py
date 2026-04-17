@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Patches V2rayConfigManager.kt with subscription chaining (prev/next proxy) + deduplication.
-Uses regex for flexible matching.
+Patches V2rayConfigManager.kt with subscription chaining + deduplication.
+No fake imports – uses existing ensureSockopt extension.
 """
 
 import re
@@ -23,19 +23,7 @@ def patch_file(filepath: Path) -> bool:
     print(f"Patching: {filepath}")
     content = filepath.read_text(encoding="utf-8")
 
-    # --- 1. Add import for ensureSockopt if missing ---
-    import_line = "import com.v2ray.ang.extension.ensureSockopt"
-    if import_line not in content:
-        # Insert after other extension imports
-        pattern = r'(import com\.v2ray\.ang\.extension\..*\n)'
-        match = re.search(pattern, content)
-        if match:
-            content = content[:match.end()] + import_line + "\n" + content[match.end():]
-            print("  ✓ Added import ensureSockopt")
-        else:
-            print("  ⚠ Could not find import block; ensureSockopt may already be resolved")
-
-    # --- 2. Modify injectCustomOutbounds signature ---
+    # --- 1. Modify injectCustomOutbounds signature ---
     old_sig = "private fun injectCustomOutbounds(v2rayConfig: V2rayConfig) {"
     new_sig = "private fun injectCustomOutbounds(v2rayConfig: V2rayConfig, outboundTagMap: MutableMap<String, String> = mutableMapOf()) {"
     if old_sig in content:
@@ -45,9 +33,7 @@ def patch_file(filepath: Path) -> bool:
         print("  ✗ Could not find injectCustomOutbounds signature")
         return False
 
-    # --- 3. Replace tag assignment block using regex ---
-    # Pattern matches the four lines that set tag, add outbound, add tag to set, and log.
-    # We'll capture the indentation and replace with properly indented new block.
+    # --- 2. Replace tag assignment block using regex (flexible whitespace) ---
     pattern = re.compile(
         r'(\s*)updateOutboundWithGlobalSettings\(outbound\)\s*\n'
         r'\s*outbound\.tag = tag\s*\n'
@@ -57,10 +43,10 @@ def patch_file(filepath: Path) -> bool:
     )
     match = pattern.search(content)
     if not match:
-        print("  ✗ Could not find outbound tag assignment block (tried regex)")
+        print("  ✗ Could not find outbound tag assignment block (regex)")
         return False
 
-    indent = match.group(1)  # preserve original indentation
+    indent = match.group(1)
     new_block = f'''{indent}updateOutboundWithGlobalSettings(outbound)
 {indent}
 {indent}// Generate unique tag for deduplication tracking
@@ -83,7 +69,7 @@ def patch_file(filepath: Path) -> bool:
     content = content[:match.start()] + new_block + content[match.end():]
     print("  ✓ Replaced outbound tag assignment block")
 
-    # --- 4. Insert applySubscriptionChain function before getRouting ---
+    # --- 3. Insert applySubscriptionChain function before getRouting ---
     routing_pattern = re.compile(r'(\n\s*private fun getRouting\([^)]*\):)')
     match = re.search(routing_pattern, content)
     if not match:
@@ -152,7 +138,7 @@ def patch_file(filepath: Path) -> bool:
     content = content[:match.start()] + new_function + "\n" + content[match.start():]
     print("  ✓ Inserted applySubscriptionChain function")
 
-    # --- 5. Modify getRouting to create outboundTagMap and pass it ---
+    # --- 4. Modify getRouting to create outboundTagMap and pass it ---
     old_call = "            injectCustomOutbounds(v2rayConfig)"
     new_call = '''            val outboundTagMap = mutableMapOf<String, String>()
             injectCustomOutbounds(v2rayConfig, outboundTagMap)'''
@@ -163,7 +149,6 @@ def patch_file(filepath: Path) -> bool:
         print("  ✗ Could not find injectCustomOutbounds call in getRouting")
         return False
 
-    # --- 6. Write back ---
     filepath.write_text(content, encoding="utf-8")
     print("  ✅ Patch applied successfully.")
     return True
