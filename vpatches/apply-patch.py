@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Patches V2rayConfigManager.kt with subscription chaining + deduplication.
-Preserves original custom outbound tag names.
+Patches V2rayConfigManager.kt with subscription chaining (prev/next) using clean tag names.
+Preserves original custom outbound tag for routing, renames appropriately for next proxy.
 """
 
 import re
@@ -33,7 +33,7 @@ def patch_file(filepath: Path) -> bool:
         print("  ✗ Could not find injectCustomOutbounds signature")
         return False
 
-    # --- 2. Replace tag assignment block (preserve original tag) ---
+    # --- 2. Replace tag assignment block (preserve original tag, add dedup) ---
     pattern = re.compile(
         r'(\s*)updateOutboundWithGlobalSettings\(outbound\)\s*\n'
         r'\s*outbound\.tag = tag\s*\n'
@@ -65,9 +65,9 @@ def patch_file(filepath: Path) -> bool:
 {indent}LogUtil.d(AppConfig.TAG, "Injected custom outbound: tag='$tag'")'''
     
     content = content[:match.start()] + new_block + content[match.end():]
-    print("  ✓ Replaced outbound tag assignment block (preserves original tag)")
+    print("  ✓ Replaced outbound tag assignment block")
 
-    # --- 3. Insert applySubscriptionChain function before getRouting ---
+    # --- 3. Insert applySubscriptionChain function with clean naming ---
     routing_pattern = re.compile(r'(\n\s*private fun getRouting\([^)]*\):)')
     match = re.search(routing_pattern, content)
     if not match:
@@ -76,9 +76,12 @@ def patch_file(filepath: Path) -> bool:
 
     new_function = '''
     /**
-     * Applies subscription chain (previous/next proxy) to an injected outbound.
-     * Handles deduplication: if the same prev/next proxy is needed by multiple outbounds,
-     * reuse the existing outbound instead of creating a new one.
+     * Applies subscription chain (previous/next proxy) to an injected custom outbound.
+     * Naming strategy:
+     * - If next proxy exists, the next outbound takes the original tag (so routing rules hit it),
+     *   and the original outbound is renamed to "$tag-orig".
+     * - Prev proxy gets a simple "$tag-prev" tag.
+     * Deduplication prevents multiple injection of the same chain outbound.
      */
     private fun applySubscriptionChain(
         v2rayConfig: V2rayConfig,
@@ -90,10 +93,13 @@ def patch_file(filepath: Path) -> bool:
         if (profile.subscriptionId.isNullOrEmpty()) return
         
         val subItem = MmkvManager.decodeSubscription(profile.subscriptionId) ?: return
+        val originalTag = outbound.tag
         
+        // Helper to add a chain outbound if not already present
         fun addChainOutbound(
             targetRemark: String?,
             chainType: String,
+            desiredTag: String,
             chainTo: (V2rayConfig.OutboundBean) -> Unit
         ) {
             if (targetRemark.isNullOrEmpty()) return
@@ -101,40 +107,50 @@ def patch_file(filepath: Path) -> bool:
             val chainProfile = SettingsManager.getServerViaRemarks(targetRemark) ?: return
             val mapKey = "$chainType-$targetRemark"
             
+            // Check if already created (deduplication)
             val existingTag = outboundTagMap[mapKey]
             if (existingTag != null) {
-                chainTo(v2rayConfig.outbounds.first { it.tag == existingTag })
-                LogUtil.d(AppConfig.TAG, "Reused $chainType outbound: $existingTag")
-                return
+                val existingOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == existingTag }
+                if (existingOutbound != null) {
+                    chainTo(existingOutbound)
+                    LogUtil.d(AppConfig.TAG, "Reused $chainType outbound: $existingTag")
+                    return
+                }
             }
             
             val chainOutbound = convertProfile2Outbound(chainProfile) ?: return
             updateOutboundWithGlobalSettings(chainOutbound)
-            
-            val generatedTag = "chain-$chainType-${targetRemark.hashCode().toString(16).take(8)}"
-            chainOutbound.tag = generatedTag
-            outboundTagMap[mapKey] = generatedTag
+            chainOutbound.tag = desiredTag
+            outboundTagMap[mapKey] = desiredTag
             
             chainTo(chainOutbound)
             v2rayConfig.outbounds.add(chainOutbound)
-            existingTags.add(generatedTag)
-            LogUtil.d(AppConfig.TAG, "Created $chainType outbound: $generatedTag")
+            existingTags.add(desiredTag)
+            LogUtil.d(AppConfig.TAG, "Created $chainType outbound: $desiredTag")
         }
         
-        addChainOutbound(subItem.prevProfile, "prev") { prevOutbound ->
+        // --- Previous proxy (simple suffix) ---
+        addChainOutbound(subItem.prevProfile, "prev", "$originalTag-prev") { prevOutbound ->
             outbound.ensureSockopt().dialerProxy = prevOutbound.tag
         }
         
-        addChainOutbound(subItem.nextProfile, "next") { nextOutbound ->
-            val originalTag = outbound.tag
-            outbound.tag = "${originalTag}-orig"
-            nextOutbound.ensureSockopt().dialerProxy = outbound.tag
-            v2rayConfig.outbounds.add(0, nextOutbound)
+        // --- Next proxy (takes over original tag) ---
+        if (!subItem.nextProfile.isNullOrEmpty()) {
+            // Rename the main outbound to make room for the next proxy
+            val newOriginalTag = "$originalTag-orig"
+            outbound.tag = newOriginalTag
+            
+            addChainOutbound(subItem.nextProfile, "next", originalTag) { nextOutbound ->
+                // Next outbound now has the original tag, and it forwards to the renamed original
+                nextOutbound.ensureSockopt().dialerProxy = newOriginalTag
+                // Place next outbound at the beginning so it's the first hit
+                v2rayConfig.outbounds.add(0, nextOutbound)
+            }
         }
     }
 '''
     content = content[:match.start()] + new_function + "\n" + content[match.start():]
-    print("  ✓ Inserted applySubscriptionChain function")
+    print("  ✓ Inserted applySubscriptionChain function (clean naming)")
 
     # --- 4. Modify getRouting to create outboundTagMap and pass it ---
     old_call = "            injectCustomOutbounds(v2rayConfig)"
