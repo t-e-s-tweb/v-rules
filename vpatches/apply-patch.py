@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Patches V2rayConfigManager.kt with subscription chaining for custom outbounds.
-Works with the actual code structure (as provided).
+Applies subscription chaining (prev/next proxy) to custom outbounds
+in v2rayNG V2rayConfigManager.kt.
+Works with the current upstream code (April 2026).
 """
 
 import re
@@ -24,7 +25,7 @@ def patch_file(filepath: Path) -> bool:
     content = filepath.read_text(encoding="utf-8")
 
     # ------------------------------------------------------------------
-    # 1. Replace injectCustomOutbounds with new version (chain support)
+    # 1. Replace injectCustomOutbounds with chain-enabled version
     # ------------------------------------------------------------------
     old_func_pattern = re.compile(
         r'(\s*)private fun injectCustomOutbounds\(v2rayConfig: V2rayConfig\) \{\n'
@@ -198,7 +199,7 @@ def main():
         sys.exit(1)
     create_backup(target)
     if patch_file(target):
-        print("\n👉 Rebuild and test subscription chaining for custom outbounds.")
+        print("\n👉 Rebuild the app and test subscription chaining for custom outbounds.")
     else:
         print("\n❌ Patching failed. Restore from backup.")
 
