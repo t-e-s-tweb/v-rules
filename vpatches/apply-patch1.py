@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Converts prev/next profile EditText fields in SubEditActivity to spinners
-that include a [Current Server] option, and resolves it at config build time.
+Converts prev/next profile EditText fields to spinners with [Current Server] option.
+No backups for resource files (to avoid build breakage).
 """
 
 import re
@@ -10,23 +10,21 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 
-def backup(filepath: Path):
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    bak = filepath.with_suffix(f"{filepath.suffix}.bak.{ts}")
-    shutil.copy2(filepath, bak)
-    print(f"  ✓ backup: {bak.name}")
+def backup_kotlin(filepath: Path):
+    """Only backup Kotlin files, skip resources."""
+    if filepath.suffix == ".kt":
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        bak = filepath.with_suffix(f".kt.bak.{ts}")
+        shutil.copy2(filepath, bak)
+        print(f"  ✓ backup: {bak.name}")
 
 def patch_app_config(filepath: Path):
     content = filepath.read_text(encoding="utf-8")
     if "CURRENT_SERVER" in content and '"__CURRENT_SERVER__"' in content:
         print("  • AppConfig already has CURRENT_SERVER")
         return
-    # Insert constant in the object AppConfig
-    # Look for a good place, e.g. after TAG_PROXY or similar.
-    # We'll insert after the line containing 'const val TAG_PROXY'
     pattern = re.compile(r'(const val TAG_PROXY\s*=\s*".*?")')
     if not pattern.search(content):
-        # fallback: after object declaration line
         pattern = re.compile(r'(object AppConfig\s*\{)')
     match = pattern.search(content)
     if not match:
@@ -39,8 +37,7 @@ def patch_app_config(filepath: Path):
 
 def patch_sub_edit_xml(filepath: Path):
     content = filepath.read_text(encoding="utf-8")
-    # Replace the pre-profile EditText block with a Spinner
-    old_pre = r'''            <LinearLayout
+    old_pre = '''            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="@dimen/padding_spacing_dp16"
@@ -82,8 +79,7 @@ def patch_sub_edit_xml(filepath: Path):
     else:
         print("  ✗ Could not find pre profile EditText block")
 
-    # Replace next profile EditText block with Spinner
-    old_next = r'''            <LinearLayout
+    old_next = '''            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="@dimen/padding_spacing_dp16"
@@ -129,15 +125,11 @@ def patch_sub_edit_xml(filepath: Path):
 
 def patch_sub_edit_activity(filepath: Path):
     content = filepath.read_text(encoding="utf-8")
-    # We'll need to add imports, modify bindingServer, clearServer, saveServer
-    # 1. Add import for AdapterView if not present
     if "import android.widget.AdapterView" not in content:
         content = content.replace(
             "import android.view.MenuItem",
             "import android.view.MenuItem\nimport android.widget.AdapterView\nimport android.widget.ArrayAdapter"
         )
-    # 2. Add private variables for spinner adapters and a list of profile remarks
-    # We'll insert after class declaration line: class SubEditActivity : BaseActivity() {
     insert_pos = content.find("class SubEditActivity : BaseActivity() {")
     if insert_pos == -1:
         raise Exception("Could not find class declaration in SubEditActivity")
@@ -161,8 +153,7 @@ def patch_sub_edit_activity(filepath: Path):
 '''
     content = content[:insert_pos] + extra_vars + content[insert_pos:]
 
-    # 3. Replace bindingServer
-    old_binding = r'''        binding.etPreProfile.text = Utils.getEditable(subItem.prevProfile)
+    old_binding = '''        binding.etPreProfile.text = Utils.getEditable(subItem.prevProfile)
         binding.etNextProfile.text = Utils.getEditable(subItem.nextProfile)'''
     new_binding = '''        // Setup pre profile spinner
         val preAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, allProfiles.map { it.second })
@@ -185,8 +176,7 @@ def patch_sub_edit_activity(filepath: Path):
         print("  ✗ Could not replace bindingServer")
         return
 
-    # 4. Replace clearServer
-    old_clear = r'''        binding.etPreProfile.text = null
+    old_clear = '''        binding.etPreProfile.text = null
         binding.etNextProfile.text = null'''
     new_clear = '''        binding.spPreProfile.setSelection(0)
         binding.spNextProfile.setSelection(0)'''
@@ -195,8 +185,7 @@ def patch_sub_edit_activity(filepath: Path):
     else:
         print("  ✗ Could not replace clearServer")
 
-    # 5. Replace saveServer (the lines that save prev/next)
-    old_save = r'''        subItem.prevProfile = binding.etPreProfile.text.toString()
+    old_save = '''        subItem.prevProfile = binding.etPreProfile.text.toString()
         subItem.nextProfile = binding.etNextProfile.text.toString()'''
     new_save = '''        val preIndex = binding.spPreProfile.selectedItemPosition
         subItem.prevProfile = if (preIndex >= 0) allProfiles.getOrNull(preIndex)?.first ?: "" else ""
@@ -212,8 +201,6 @@ def patch_sub_edit_activity(filepath: Path):
 
 def patch_v2ray_config_manager(filepath: Path):
     content = filepath.read_text(encoding="utf-8")
-    # We need to modify getMoreOutbounds and applySubscriptionChain to resolve CURRENT_SERVER
-    # Helper function to resolve remarks
     resolve_func = '''
     private fun resolveCurrentServer(remark: String?): String? {
         if (remark == AppConfig.CURRENT_SERVER) {
@@ -224,7 +211,6 @@ def patch_v2ray_config_manager(filepath: Path):
         return remark
     }
 '''
-    # Insert resolveCurrentServer before getMoreOutbounds
     pattern = r'(\n\s*private fun getMoreOutbounds\()'
     match = re.search(pattern, content)
     if not match:
@@ -232,16 +218,12 @@ def patch_v2ray_config_manager(filepath: Path):
         return
     content = content[:match.start()] + resolve_func + content[match.start():]
 
-    # Modify getMoreOutbounds: resolve prevProfile/nextProfile before using them
-    # We'll replace the lines that call getServerViaRemarks with the resolved remark
-    # For prev:
     old_prev = "val prevNode = SettingsManager.getServerViaRemarks(subItem.prevProfile)"
     new_prev = "val prevNode = SettingsManager.getServerViaRemarks(resolveCurrentServer(subItem.prevProfile) ?: subItem.prevProfile)"
     if old_prev in content:
         content = content.replace(old_prev, new_prev)
     else:
         print("  ✗ Could not update prevNode line")
-    # For next:
     old_next = "val nextNode = SettingsManager.getServerViaRemarks(subItem.nextProfile)"
     new_next = "val nextNode = SettingsManager.getServerViaRemarks(resolveCurrentServer(subItem.nextProfile) ?: subItem.nextProfile)"
     if old_next in content:
@@ -249,11 +231,7 @@ def patch_v2ray_config_manager(filepath: Path):
     else:
         print("  ✗ Could not update nextNode line")
 
-    # Modify applySubscriptionChain (if it exists) – same resolution
     if "private fun applySubscriptionChain" in content:
-        # Inside addChainOutbound, the targetRemark is used; we need to resolve it.
-        # However, the patched version may already be present. We'll look for the line:
-        # "val chainProfile = SettingsManager.getServerViaRemarks(targetRemark) ?: return"
         old_chain_get = "val chainProfile = SettingsManager.getServerViaRemarks(targetRemark) ?: return"
         new_chain_get = "val chainProfile = SettingsManager.getServerViaRemarks(resolveCurrentServer(targetRemark) ?: targetRemark) ?: return"
         if old_chain_get in content:
@@ -304,7 +282,10 @@ def main():
         if not path.exists():
             print(f"File not found: {path}")
             sys.exit(1)
-        backup(path)
+        # Only backup Kotlin files
+        if path.suffix == ".kt":
+            backup_kotlin(path)
+
     try:
         patch_app_config(files["AppConfig.kt"])
         patch_sub_edit_xml(files["activity_sub_edit.xml"])
