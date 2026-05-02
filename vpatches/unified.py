@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Unified patcher for v2rayNG (compatible with commit dc1d3a27).
-Applies: custom-outbound chaining, spinner UI, [Current Server] resolve.
-Target: CoreConfigManager.kt (package com.v2ray.ang.core)
+Unified patcher for v2rayNG (commits 3e823a7 + a12909e).
+Adds: custom-outbound subscription chaining, spinner UI for front/landing proxy,
+      [Current Server] resolve, deduplication.
 """
 
 import re, sys, shutil
@@ -120,11 +120,14 @@ def patch_layout():
         write(p, c)
         print("✓ activity_sub_edit.xml: spinners added")
     else:
-        print("✗ activity_sub_edit.xml: blocks not found")
+        print("✗ activity_sub_edit.xml: blocks not found (maybe already patched)")
 
 # ── 3. SubEditActivity.kt ────────────────────────────────────────────
 def patch_subedit():
     p = BASE / "app/src/main/java/com/v2ray/ang/ui/SubEditActivity.kt"
+    if not p.exists():
+        print("✗ SubEditActivity.kt not found – skipping spinner UI")
+        return
     c = read(p)
 
     if "import android.widget.AdapterView" not in c:
@@ -171,7 +174,7 @@ def patch_subedit():
     if old_b in c:
         c = c.replace(old_b, new_b)
     else:
-        print("✗ SubEditActivity: bindingServer block not found"); return
+        print("✗ SubEditActivity: bindingServer block not found (maybe already patched)")
 
     old_cl = '''        binding.etPreProfile.text = null
         binding.etNextProfile.text = null'''
@@ -214,73 +217,57 @@ def patch_coreconfig():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
     c = read(p)
 
-    # ── 5a. Replace injectCustomOutbounds (chain-enabled version) ─────
-    # NOTE: The upstream has NO updateOutboundWithGlobalSettings calls inside.
-    old_inject = '''    private fun injectCustomOutbounds(v2rayConfig: V2rayConfig) {
+    # ── 5a. Replace injectCustomOutbounds with chain-enabled version ───────────
+    old_inject = '''    private fun injectCustomOutbounds(v2rayConfig: V2rayConfig, customOutbounds: Map<String, ProfileItem>) {
         val existingTags = v2rayConfig.outbounds.mapTo(mutableSetOf()) { it.tag }
-        val rulesetItems = MmkvManager.decodeRoutingRulesets() ?: return
 
-        rulesetItems
-            .filter { it.enabled }
-            .mapNotNull { it.outboundTag.takeIf { tag -> tag.isNotBlank() } }
-            .filter { it !in AppConfig.BUILTIN_OUTBOUND_TAGS }
-            .distinct()
-            .forEach { tag ->
-                if (tag in existingTags) return@forEach
-                try {
-                    val profile = SettingsManager.getServerViaRemarks(tag) ?: run {
-                        LogUtil.w(AppConfig.TAG, "Custom outbound tag '$tag' not found by remarks, skipping")
-                        return@forEach
-                    }
-                    val outbound = convertProfile2Outbound(profile) ?: run {
-                        LogUtil.w(AppConfig.TAG, "Could not convert profile '$tag' to outbound, skipping")
-                        return@forEach
-                    }
-                    outbound.tag = tag
-                    v2rayConfig.outbounds.add(outbound)
-                    existingTags.add(tag)
-                    LogUtil.d(AppConfig.TAG, "Injected custom outbound: tag='$tag'")
-                } catch (e: Exception) {
-                    LogUtil.e(AppConfig.TAG, "Failed to inject custom outbound for tag '$tag', skipping", e)
-                }
-            }
-    }'''
-    new_inject = '''    private fun injectCustomOutbounds(v2rayConfig: V2rayConfig, outboundTagMap: MutableMap<String, String> = mutableMapOf()) {
-        val existingTags = v2rayConfig.outbounds.mapTo(mutableSetOf()) { it.tag }
-        val rulesetItems = MmkvManager.decodeRoutingRulesets() ?: return
-
-        rulesetItems
-            .filter { it.enabled }
-            .mapNotNull { it.outboundTag.takeIf { tag -> tag.isNotBlank() } }
-            .filter { it !in AppConfig.BUILTIN_OUTBOUND_TAGS }
-            .distinct()
-            .forEach { tag ->
-                if (outboundTagMap.containsKey(tag)) {
-                    LogUtil.d(AppConfig.TAG, "Custom outbound '$tag' already injected, skipping")
+        customOutbounds.forEach { (tag, profile) ->
+            if (tag in existingTags) return@forEach
+            try {
+                val outbound = convertProfile2Outbound(profile) ?: run {
+                    LogUtil.w(AppConfig.TAG, "Could not convert profile '$tag' to outbound, skipping")
                     return@forEach
                 }
-                try {
-                    val profile = SettingsManager.getServerViaRemarks(tag) ?: run {
-                        LogUtil.w(AppConfig.TAG, "Custom outbound tag '$tag' not found by remarks, skipping")
-                        return@forEach
-                    }
-                    val outbound = convertProfile2Outbound(profile) ?: run {
-                        LogUtil.w(AppConfig.TAG, "Could not convert profile '$tag' to outbound, skipping")
-                        return@forEach
-                    }
-                    outbound.tag = tag
-
-                    applySubscriptionChain(v2rayConfig, profile, outbound, outboundTagMap, existingTags)
-
-                    v2rayConfig.outbounds.add(outbound)
-                    existingTags.add(tag)
-                    outboundTagMap[tag] = tag
-                    LogUtil.d(AppConfig.TAG, "Injected custom outbound: tag='$tag'")
-                } catch (e: Exception) {
-                    LogUtil.e(AppConfig.TAG, "Failed to inject custom outbound for tag '$tag', skipping", e)
-                }
+                outbound.tag = tag
+                v2rayConfig.outbounds.add(outbound)
+                existingTags.add(tag)
+                LogUtil.d(AppConfig.TAG, "Injected custom outbound: tag='$tag'")
+            } catch (e: Exception) {
+                LogUtil.e(AppConfig.TAG, "Failed to inject custom outbound for tag '$tag', skipping", e)
             }
+        }
     }'''
+
+    new_inject = '''    private fun injectCustomOutbounds(v2rayConfig: V2rayConfig, customOutbounds: Map<String, ProfileItem>) {
+        val existingTags = v2rayConfig.outbounds.mapTo(mutableSetOf()) { it.tag }
+        val outboundTagMap = mutableMapOf<String, String>()  // dedup tracker
+
+        customOutbounds.forEach { (tag, profile) ->
+            // Dedup: skip if this custom outbound was already processed
+            if (outboundTagMap.containsKey(tag)) {
+                LogUtil.d(AppConfig.TAG, "Custom outbound '$tag' already injected, skipping")
+                return@forEach
+            }
+            try {
+                val outbound = convertProfile2Outbound(profile) ?: run {
+                    LogUtil.w(AppConfig.TAG, "Could not convert profile '$tag' to outbound, skipping")
+                    return@forEach
+                }
+                outbound.tag = tag
+
+                // Apply subscription chain (prev/next proxy) if applicable
+                applySubscriptionChain(v2rayConfig, profile, outbound, outboundTagMap, existingTags)
+
+                v2rayConfig.outbounds.add(outbound)
+                existingTags.add(tag)
+                outboundTagMap[tag] = tag  // mark processed
+                LogUtil.d(AppConfig.TAG, "Injected custom outbound: tag='$tag'")
+            } catch (e: Exception) {
+                LogUtil.e(AppConfig.TAG, "Failed to inject custom outbound for tag '$tag', skipping", e)
+            }
+        }
+    }'''
+
     if old_inject in c:
         c = c.replace(old_inject, new_inject)
         print("✓ CoreConfig: injectCustomOutbounds → chain-enabled")
@@ -288,11 +275,12 @@ def patch_coreconfig():
         print("✗ CoreConfig: injectCustomOutbounds block not found – maybe already patched?")
 
     # ── 5b. Insert resolveCurrentServer + applySubscriptionChain ─────
-    # Insert BEFORE getRouting
-    routing_pat = re.compile(r'(\n    private fun getRouting\(context: Context,)')
+    # Insert BEFORE getRouting function
+    routing_pat = re.compile(r'(\n    private fun getRouting\(configContext: CoreConfigContext,)')
     m = re.search(routing_pat, c)
     if not m:
-        print("✗ CoreConfig: getRouting anchor not found"); return
+        print("✗ CoreConfig: getRouting anchor not found")
+        return
 
     resolve_func = '''
     private fun resolveCurrentServer(remark: String?): String? {
@@ -389,21 +377,7 @@ def patch_coreconfig():
     c = c[:m.start()] + resolve_func + c[m.start():]
     print("✓ CoreConfig: inserted resolveCurrentServer + applySubscriptionChain")
 
-    # ── 5c. Update getRouting to create outboundTagMap ─────────────────
-    old_call = "            injectCustomOutbounds(v2rayConfig)"
-    new_call = '''            val outboundTagMap = mutableMapOf<String, String>()
-            injectCustomOutbounds(v2rayConfig, outboundTagMap)'''
-    if old_call in c:
-        c = c.replace(old_call, new_call)
-        print("✓ CoreConfig: getRouting updated")
-    else:
-        print("✗ CoreConfig: getRouting call not found")
-
-    # ── 5d. getMoreOutbounds was REMOVED upstream → skip old blocks ──
-    if "private fun getMoreOutbounds" in c:
-        print("ℹ getMoreOutbounds still exists (older version) – skipping patching (builder handles it now)")
-    else:
-        print("• getMoreOutbounds absent – standard chaining handled by CoreConfigContextBuilder.")
+    # ── 5c. No need to modify getRouting call site – it already passes the map ──
 
     write(p, c)
 
