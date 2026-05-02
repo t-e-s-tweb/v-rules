@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Unified patcher for v2rayNG (compatible with commits 3b8615f + d0f1e21).
-Applies: custom-outbound chaining, spinner UI, reuse-proxy logic.
+Unified patcher for v2rayNG (compatible with commit dc1d3a27).
+Applies: custom-outbound chaining, spinner UI, [Current Server] resolve.
 Target: CoreConfigManager.kt (package com.v2ray.ang.core)
 """
 
@@ -209,14 +209,13 @@ def patch_strings():
     else:
         print("• strings.xml: already present")
 
-# ── 5. CoreConfigManager.kt (all chain/spinner/reuse logic) ───────────
+# ── 5. CoreConfigManager.kt (custom-outbound chain + resolve) ────────
 def patch_coreconfig():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
     c = read(p)
 
-    # ── 5a. Replace injectCustomOutbounds ─────────────────────────────
-    # NOTE: updateOutboundWithGlobalSettings was REMOVED upstream –
-    # CoreOutboundBuilder.convert() now applies it internally.
+    # ── 5a. Replace injectCustomOutbounds (chain-enabled version) ─────
+    # NOTE: The upstream has NO updateOutboundWithGlobalSettings calls inside.
     old_inject = '''    private fun injectCustomOutbounds(v2rayConfig: V2rayConfig) {
         val existingTags = v2rayConfig.outbounds.mapTo(mutableSetOf()) { it.tag }
         val rulesetItems = MmkvManager.decodeRoutingRulesets() ?: return
@@ -286,19 +285,15 @@ def patch_coreconfig():
         c = c.replace(old_inject, new_inject)
         print("✓ CoreConfig: injectCustomOutbounds → chain-enabled")
     else:
-        print("✗ CoreConfig: injectCustomOutbounds block not found")
-        # Don't abort – maybe already patched
-        if "applySubscriptionChain" in c:
-            print("   (applySubscriptionChain already present – skipping inject replacement)")
+        print("✗ CoreConfig: injectCustomOutbounds block not found – maybe already patched?")
 
     # ── 5b. Insert resolveCurrentServer + applySubscriptionChain ─────
+    # Insert BEFORE getRouting
     routing_pat = re.compile(r'(\n    private fun getRouting\(context: Context,)')
     m = re.search(routing_pat, c)
     if not m:
         print("✗ CoreConfig: getRouting anchor not found"); return
 
-    # NOTE: No updateOutboundWithGlobalSettings calls inside –
-    # convertProfile2Outbound now handles global settings internally.
     resolve_func = '''
     private fun resolveCurrentServer(remark: String?): String? {
         if (remark == AppConfig.CURRENT_SERVER) {
@@ -404,85 +399,11 @@ def patch_coreconfig():
     else:
         print("✗ CoreConfig: getRouting call not found")
 
-    # ── 5d. getMoreOutbounds signature + prev/next blocks ─────────────
-    old_sig = "private fun getMoreOutbounds(v2rayConfig: V2rayConfig, subscriptionId: String): Boolean {"
-    new_sig = "private fun getMoreOutbounds(v2rayConfig: V2rayConfig, subscriptionId: String, mainProfileRemarks: String? = null): Boolean {"
-    if old_sig in c:
-        c = c.replace(old_sig, new_sig)
-        print("✓ CoreConfig: getMoreOutbounds signature updated")
+    # ── 5d. getMoreOutbounds was REMOVED upstream → skip old blocks ──
+    if "private fun getMoreOutbounds" in c:
+        print("ℹ getMoreOutbounds still exists (older version) – skipping patching (builder handles it now)")
     else:
-        print("✗ CoreConfig: getMoreOutbounds signature not found")
-
-    for old_call_site in ["getMoreOutbounds(v2rayConfig, config.subscriptionId)"]:
-        new_call_site = "getMoreOutbounds(v2rayConfig, config.subscriptionId, config.remarks)"
-        if old_call_site in c and new_call_site not in c:
-            c = c.replace(old_call_site, new_call_site)
-            print("✓ CoreConfig: call site updated")
-
-    # Prev block (NOTE: updateOutboundWithGlobalSettings removed upstream)
-    old_prev = '''            //Previous proxy
-            val prevNode = SettingsManager.getServerViaRemarks(subItem.prevProfile)
-            if (prevNode != null) {
-                val prevOutbound = convertProfile2Outbound(prevNode)
-                if (prevOutbound != null) {
-                    prevOutbound.tag = AppConfig.TAG_PROXY + "2"
-                    v2rayConfig.outbounds.add(prevOutbound)
-                    outbound.ensureSockopt().dialerProxy = prevOutbound.tag
-                }
-            }'''
-    new_prev = '''            //Previous proxy
-            val prevNode = SettingsManager.getServerViaRemarks(resolveCurrentServer(subItem.prevProfile) ?: subItem.prevProfile)
-            if (prevNode != null) {
-                if (prevNode.remarks == mainProfileRemarks) {
-                    outbound.ensureSockopt().dialerProxy = AppConfig.TAG_PROXY
-                    LogUtil.d(AppConfig.TAG, "Prev proxy is main server, set dialerProxy to proxy")
-                } else {
-                    val prevOutbound = convertProfile2Outbound(prevNode)
-                    if (prevOutbound != null) {
-                        prevOutbound.tag = AppConfig.TAG_PROXY + "2"
-                        v2rayConfig.outbounds.add(prevOutbound)
-                        outbound.ensureSockopt().dialerProxy = prevOutbound.tag
-                    }
-                }
-            }'''
-    if old_prev in c:
-        c = c.replace(old_prev, new_prev)
-        print("✓ CoreConfig: prev proxy block patched")
-    else:
-        print("✗ CoreConfig: prev proxy block not found")
-
-    # Next block (NOTE: updateOutboundWithGlobalSettings removed upstream)
-    old_next = '''            //Next proxy
-            val nextNode = SettingsManager.getServerViaRemarks(subItem.nextProfile)
-            if (nextNode != null) {
-                val nextOutbound = convertProfile2Outbound(nextNode)
-                if (nextOutbound != null) {
-                    nextOutbound.tag = AppConfig.TAG_PROXY
-                    v2rayConfig.outbounds.add(0, nextOutbound)
-                    outbound.tag = AppConfig.TAG_PROXY + "1"
-                    nextOutbound.ensureSockopt().dialerProxy = outbound.tag
-                }
-            }'''
-    new_next = '''            //Next proxy
-            val nextNode = SettingsManager.getServerViaRemarks(resolveCurrentServer(subItem.nextProfile) ?: subItem.nextProfile)
-            if (nextNode != null) {
-                if (nextNode.remarks == mainProfileRemarks) {
-                    LogUtil.d(AppConfig.TAG, "Next proxy is main server, skipping")
-                } else {
-                    val nextOutbound = convertProfile2Outbound(nextNode)
-                    if (nextOutbound != null) {
-                        nextOutbound.tag = AppConfig.TAG_PROXY
-                        v2rayConfig.outbounds.add(0, nextOutbound)
-                        outbound.tag = AppConfig.TAG_PROXY + "1"
-                        nextOutbound.ensureSockopt().dialerProxy = outbound.tag
-                    }
-                }
-            }'''
-    if old_next in c:
-        c = c.replace(old_next, new_next)
-        print("✓ CoreConfig: next proxy block patched")
-    else:
-        print("✗ CoreConfig: next proxy block not found")
+        print("• getMoreOutbounds absent – standard chaining handled by CoreConfigContextBuilder.")
 
     write(p, c)
 
