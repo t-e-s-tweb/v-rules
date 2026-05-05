@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unified patcher for v2rayNG (commits 3e823a7 + a12909e).
+Unified patcher for v2rayNG (latest upstream as of May 2025).
 Adds: custom-outbound subscription chaining, spinner UI for front/landing proxy,
       [Current Server] resolve, deduplication.
 """
@@ -212,59 +212,47 @@ def patch_strings():
     else:
         print("• strings.xml: already present")
 
-# ── 5. CoreConfigManager.kt (custom-outbound chain + resolve) ────────
+# ── 5. CoreConfigManager.kt (only injectCustomOutbounds + insert helpers) ─
 def patch_coreconfig():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
     c = read(p)
 
-    # ── 5a. Replace injectCustomOutbounds with chain-enabled version ───────────
+    # ── 5a. Replace injectCustomOutbounds ─────────────────────────────
     old_inject = '''    private fun injectCustomOutbounds(v2rayConfig: V2rayConfig, customOutbounds: Map<String, ProfileItem>) {
         val existingTags = v2rayConfig.outbounds.mapTo(mutableSetOf()) { it.tag }
 
         customOutbounds.forEach { (tag, profile) ->
             if (tag in existingTags) return@forEach
-            try {
-                val outbound = convertProfile2Outbound(profile) ?: run {
-                    LogUtil.w(AppConfig.TAG, "Could not convert profile '$tag' to outbound, skipping")
-                    return@forEach
-                }
-                outbound.tag = tag
-                v2rayConfig.outbounds.add(outbound)
-                existingTags.add(tag)
-                LogUtil.d(AppConfig.TAG, "Injected custom outbound: tag='$tag'")
-            } catch (e: Exception) {
-                LogUtil.e(AppConfig.TAG, "Failed to inject custom outbound for tag '$tag', skipping", e)
-            }
+            val outbound = convertProfile2Outbound(profile)
+                ?: error("Could not convert profile '$tag' to outbound")
+            outbound.tag = tag
+            v2rayConfig.outbounds.add(outbound)
+            existingTags.add(tag)
+            LogUtil.d(AppConfig.TAG, "Injected custom outbound: tag='$tag'")
         }
     }'''
 
     new_inject = '''    private fun injectCustomOutbounds(v2rayConfig: V2rayConfig, customOutbounds: Map<String, ProfileItem>) {
         val existingTags = v2rayConfig.outbounds.mapTo(mutableSetOf()) { it.tag }
-        val outboundTagMap = mutableMapOf<String, String>()  // dedup tracker
+        val outboundTagMap = mutableMapOf<String, String>()
 
         customOutbounds.forEach { (tag, profile) ->
-            // Dedup: skip if this custom outbound was already processed
+            // Dedup: skip if already processed
             if (outboundTagMap.containsKey(tag)) {
                 LogUtil.d(AppConfig.TAG, "Custom outbound '$tag' already injected, skipping")
                 return@forEach
             }
-            try {
-                val outbound = convertProfile2Outbound(profile) ?: run {
-                    LogUtil.w(AppConfig.TAG, "Could not convert profile '$tag' to outbound, skipping")
-                    return@forEach
-                }
-                outbound.tag = tag
+            val outbound = convertProfile2Outbound(profile)
+                ?: error("Could not convert profile '$tag' to outbound")
+            outbound.tag = tag
 
-                // Apply subscription chain (prev/next proxy) if applicable
-                applySubscriptionChain(v2rayConfig, profile, outbound, outboundTagMap, existingTags)
+            // Apply subscription chain (prev/next proxy) if applicable
+            applySubscriptionChain(v2rayConfig, profile, outbound, outboundTagMap, existingTags)
 
-                v2rayConfig.outbounds.add(outbound)
-                existingTags.add(tag)
-                outboundTagMap[tag] = tag  // mark processed
-                LogUtil.d(AppConfig.TAG, "Injected custom outbound: tag='$tag'")
-            } catch (e: Exception) {
-                LogUtil.e(AppConfig.TAG, "Failed to inject custom outbound for tag '$tag', skipping", e)
-            }
+            v2rayConfig.outbounds.add(outbound)
+            existingTags.add(tag)
+            outboundTagMap[tag] = tag
+            LogUtil.d(AppConfig.TAG, "Injected custom outbound: tag='$tag'")
         }
     }'''
 
@@ -275,7 +263,6 @@ def patch_coreconfig():
         print("✗ CoreConfig: injectCustomOutbounds block not found – maybe already patched?")
 
     # ── 5b. Insert resolveCurrentServer + applySubscriptionChain ─────
-    # Insert BEFORE getRouting function
     routing_pat = re.compile(r'(\n    private fun getRouting\(configContext: CoreConfigContext,)')
     m = re.search(routing_pat, c)
     if not m:
@@ -376,8 +363,6 @@ def patch_coreconfig():
 '''
     c = c[:m.start()] + resolve_func + c[m.start():]
     print("✓ CoreConfig: inserted resolveCurrentServer + applySubscriptionChain")
-
-    # ── 5c. No need to modify getRouting call site – it already passes the map ──
 
     write(p, c)
 
