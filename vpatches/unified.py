@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unified patcher for v2rayNG (definitive fix).
+Unified patcher for v2rayNG (final working version).
 - Adds custom outbound injection with prev/next chaining.
 - Enhances SubEditActivity dropdown with None and [Current Server].
 - Adds AppConfig.CURRENT_SERVER constant.
@@ -201,7 +201,7 @@ def patch_strings():
         print("• strings.xml: already present")
 
 # ─────────────────────────────────────────────────────────────────────────
-# 4. CoreConfigManager.kt – inject custom outbounds and chain support (robust)
+# 4. CoreConfigManager.kt – inject custom outbounds and chain support (safe)
 # ─────────────────────────────────────────────────────────────────────────
 def patch_coreconfig():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
@@ -211,17 +211,16 @@ def patch_coreconfig():
     c = read(p)
 
     # ------------------------------------------------------------------
-    # 1. Insert helper functions BEFORE the data class BalancerStrategy
-    #    (that's the last top-level declaration inside the object)
+    # 1. Insert helper functions before the "    // endregion" line
+    #    This is the last line of the file (after data class BalancerStrategy)
     # ------------------------------------------------------------------
     if "private fun injectCustomOutbounds" not in c:
-        marker = "private data class BalancerStrategy("
+        marker = "    // endregion"
         if marker not in c:
-            print("✗ CoreConfigManager: anchor 'private data class BalancerStrategy' not found")
+            print("✗ CoreConfigManager: anchor '    // endregion' not found")
             return
 
-        # Build raw helper text with proper indentation (4 spaces)
-        helpers_raw = r"""
+        helpers_raw = """
     // ------------------------------------------------------------------
     // Custom outbound injection with chain proxy support
     // ------------------------------------------------------------------
@@ -344,8 +343,8 @@ def patch_coreconfig():
     }
 """
         # Insert helpers right before the marker line
-        c = c.replace(marker, helpers_raw + "\n\n    " + marker)
-        print("✓ CoreConfigManager: added helper functions before BalancerStrategy")
+        c = c.replace(marker, helpers_raw + "\n\n" + marker)
+        print("✓ CoreConfigManager: added helper functions before '// endregion'")
     else:
         print("• CoreConfigManager: helpers already present")
 
@@ -375,7 +374,7 @@ def patch_coreconfig():
 # ─────────────────────────────────────────────────────────────────────────
 def main():
     print("=" * 70)
-    print("Custom Outbound + Enhanced Profile Selector Patcher (Definitive)")
+    print("Custom Outbound + Enhanced Profile Selector Patcher (Final)")
     print("=" * 70)
 
     files_to_backup = [
