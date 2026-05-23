@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unified patcher for v2rayNG (final reliable version).
+Unified patcher for v2rayNG (definitive fix).
 - Adds custom outbound injection with prev/next chaining.
 - Enhances SubEditActivity dropdown with None and [Current Server].
 - Adds AppConfig.CURRENT_SERVER constant.
@@ -201,7 +201,7 @@ def patch_strings():
         print("• strings.xml: already present")
 
 # ─────────────────────────────────────────────────────────────────────────
-# 4. CoreConfigManager.kt – inject custom outbounds and chain support (reliable)
+# 4. CoreConfigManager.kt – inject custom outbounds and chain support (robust)
 # ─────────────────────────────────────────────────────────────────────────
 def patch_coreconfig():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
@@ -211,144 +211,147 @@ def patch_coreconfig():
     c = read(p)
 
     # ------------------------------------------------------------------
-    # 1. Insert helper functions right before the final '}' of the object
+    # 1. Insert helper functions BEFORE the data class BalancerStrategy
+    #    (that's the last top-level declaration inside the object)
     # ------------------------------------------------------------------
     if "private fun injectCustomOutbounds" not in c:
-        last_brace = c.rfind('}')
-        if last_brace == -1:
-            print("✗ CoreConfigManager: no closing brace found")
+        marker = "private data class BalancerStrategy("
+        if marker not in c:
+            print("✗ CoreConfigManager: anchor 'private data class BalancerStrategy' not found")
             return
-        indent = '    '
-        helpers = f'''
-{indent}// ------------------------------------------------------------------
-{indent}// Custom outbound injection with chain proxy support
-{indent}// ------------------------------------------------------------------
 
-{indent}/**
-{indent} * Resolves [Current Server] placeholder to the actual selected server's remark.
-{indent} */
-{indent}private fun resolveCurrentServer(remark: String?): String? {{
-{indent}    if (remark == AppConfig.CURRENT_SERVER) {{
-{indent}        val currId = MmkvManager.getSelectServer()
-{indent}        if (!currId.isNullOrEmpty()) {{
-{indent}            val profile = MmkvManager.decodeServerConfig(currId)
-{indent}            return profile?.remarks
-{indent}        }}
-{indent}    }}
-{indent}    return remark
-{indent}}}
+        # Build raw helper text with proper indentation (4 spaces)
+        helpers_raw = r"""
+    // ------------------------------------------------------------------
+    // Custom outbound injection with chain proxy support
+    // ------------------------------------------------------------------
 
-{indent}/**
-{indent} * Applies subscription chain (prev/next proxy) to a custom outbound.
-{indent} */
-{indent}private fun applySubscriptionChain(
-{indent}    v2rayConfig: V2rayConfig,
-{indent}    profile: ProfileItem,
-{indent}    outbound: V2rayConfig.OutboundBean,
-{indent}    outboundTagMap: MutableMap<String, String>,
-{indent}    existingTags: MutableSet<String>
-{indent}) {{
-{indent}    if (profile.subscriptionId.isNullOrEmpty()) return
+    /**
+     * Resolves [Current Server] placeholder to the actual selected server's remark.
+     */
+    private fun resolveCurrentServer(remark: String?): String? {
+        if (remark == AppConfig.CURRENT_SERVER) {
+            val currId = MmkvManager.getSelectServer()
+            if (!currId.isNullOrEmpty()) {
+                val profile = MmkvManager.decodeServerConfig(currId)
+                return profile?.remarks
+            }
+        }
+        return remark
+    }
 
-{indent}    val subItem = MmkvManager.decodeSubscription(profile.subscriptionId) ?: return
-{indent}    val originalTag = outbound.tag
+    /**
+     * Applies subscription chain (prev/next proxy) to a custom outbound.
+     */
+    private fun applySubscriptionChain(
+        v2rayConfig: V2rayConfig,
+        profile: ProfileItem,
+        outbound: V2rayConfig.OutboundBean,
+        outboundTagMap: MutableMap<String, String>,
+        existingTags: MutableSet<String>
+    ) {
+        if (profile.subscriptionId.isNullOrEmpty()) return
 
-{indent}    fun addChainOutbound(
-{indent}        targetRemark: String?,
-{indent}        chainType: String,
-{indent}        desiredTag: String,
-{indent}        chainTo: (V2rayConfig.OutboundBean) -> Unit
-{indent}    ) {{
-{indent}        if (targetRemark.isNullOrEmpty()) return
+        val subItem = MmkvManager.decodeSubscription(profile.subscriptionId) ?: return
+        val originalTag = outbound.tag
 
-{indent}        val existingByTag = v2rayConfig.outbounds.firstOrNull {{ it.tag == desiredTag }}
-{indent}        if (existingByTag != null) {{
-{indent}            chainTo(existingByTag)
-{indent}            outboundTagMap["$chainType-$targetRemark"] = desiredTag
-{indent}            LogUtil.d(AppConfig.TAG, "Reused existing $chainType outbound: $desiredTag")
-{indent}            return
-{indent}        }}
+        fun addChainOutbound(
+            targetRemark: String?,
+            chainType: String,
+            desiredTag: String,
+            chainTo: (V2rayConfig.OutboundBean) -> Unit
+        ) {
+            if (targetRemark.isNullOrEmpty()) return
 
-{indent}        val mapKey = "$chainType-$targetRemark"
-{indent}        val existingTag = outboundTagMap[mapKey]
-{indent}        if (existingTag != null) {{
-{indent}            val existingOutbound = v2rayConfig.outbounds.firstOrNull {{ it.tag == existingTag }}
-{indent}            if (existingOutbound != null) {{
-{indent}                chainTo(existingOutbound)
-{indent}                LogUtil.d(AppConfig.TAG, "Reused $chainType outbound (map): $existingTag")
-{indent}                return
-{indent}            }}
-{indent}        }}
+            val existingByTag = v2rayConfig.outbounds.firstOrNull { it.tag == desiredTag }
+            if (existingByTag != null) {
+                chainTo(existingByTag)
+                outboundTagMap["$chainType-$targetRemark"] = desiredTag
+                LogUtil.d(AppConfig.TAG, "Reused existing $chainType outbound: $desiredTag")
+                return
+            }
 
-{indent}        val chainProfile = SettingsManager.getServerViaRemarks(targetRemark) ?: return
-{indent}        val mainRemarks = MmkvManager.getSelectServer()?.let {{ MmkvManager.decodeServerConfig(it)?.remarks }}
-{indent}        if (chainProfile.remarks == mainRemarks) {{
-{indent}            outbound.ensureSockopt().dialerProxy = AppConfig.TAG_PROXY
-{indent}            LogUtil.d(AppConfig.TAG, "Chain $chainType proxy is main server, set dialerProxy to proxy")
-{indent}            return
-{indent}        }}
+            val mapKey = "$chainType-$targetRemark"
+            val existingTag = outboundTagMap[mapKey]
+            if (existingTag != null) {
+                val existingOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == existingTag }
+                if (existingOutbound != null) {
+                    chainTo(existingOutbound)
+                    LogUtil.d(AppConfig.TAG, "Reused $chainType outbound (map): $existingTag")
+                    return
+                }
+            }
 
-{indent}        val chainOutbound = convertProfile2Outbound(chainProfile) ?: return
-{indent}        chainOutbound.tag = desiredTag
-{indent}        outboundTagMap[mapKey] = desiredTag
+            val chainProfile = SettingsManager.getServerViaRemarks(targetRemark) ?: return
+            val mainRemarks = MmkvManager.getSelectServer()?.let { MmkvManager.decodeServerConfig(it)?.remarks }
+            if (chainProfile.remarks == mainRemarks) {
+                outbound.ensureSockopt().dialerProxy = AppConfig.TAG_PROXY
+                LogUtil.d(AppConfig.TAG, "Chain $chainType proxy is main server, set dialerProxy to proxy")
+                return
+            }
 
-{indent}        chainTo(chainOutbound)
-{indent}        v2rayConfig.outbounds.add(chainOutbound)
-{indent}        existingTags.add(desiredTag)
-{indent}        LogUtil.d(AppConfig.TAG, "Created $chainType outbound: $desiredTag")
-{indent}    }}
+            val chainOutbound = convertProfile2Outbound(chainProfile) ?: return
+            chainOutbound.tag = desiredTag
+            outboundTagMap[mapKey] = desiredTag
 
-{indent}    addChainOutbound(resolveCurrentServer(subItem.prevProfile), "prev", "$originalTag-prev") {{ prevOutbound ->
-{indent}        outbound.ensureSockopt().dialerProxy = prevOutbound.tag
-{indent}    }}
+            chainTo(chainOutbound)
+            v2rayConfig.outbounds.add(chainOutbound)
+            existingTags.add(desiredTag)
+            LogUtil.d(AppConfig.TAG, "Created $chainType outbound: $desiredTag")
+        }
 
-{indent}    if (!subItem.nextProfile.isNullOrEmpty()) {{
-{indent}        val newOriginalTag = "$originalTag-orig"
-{indent}        outbound.tag = newOriginalTag
+        addChainOutbound(resolveCurrentServer(subItem.prevProfile), "prev", "$originalTag-prev") { prevOutbound ->
+            outbound.ensureSockopt().dialerProxy = prevOutbound.tag
+        }
 
-{indent}        addChainOutbound(resolveCurrentServer(subItem.nextProfile), "next", originalTag) {{ nextOutbound ->
-{indent}            nextOutbound.ensureSockopt().dialerProxy = newOriginalTag
-{indent}        }}
-{indent}    }}
-{indent}}}
+        if (!subItem.nextProfile.isNullOrEmpty()) {
+            val newOriginalTag = "$originalTag-orig"
+            outbound.tag = newOriginalTag
 
-{indent}/**
-{indent} * Injects custom outbounds referenced by routing rules that are not built-in.
-{indent} * Also applies prev/next chaining if the profile belongs to a subscription.
-{indent} */
-{indent}private fun injectCustomOutbounds(v2rayConfig: V2rayConfig) {{
-{indent}    val existingTags = v2rayConfig.outbounds.mapTo(mutableSetOf()) {{ it.tag }}
-{indent}    val outboundTagMap = mutableMapOf<String, String>()
+            addChainOutbound(resolveCurrentServer(subItem.nextProfile), "next", originalTag) { nextOutbound ->
+                nextOutbound.ensureSockopt().dialerProxy = newOriginalTag
+            }
+        }
+    }
 
-{indent}    val rulesetItems = MmkvManager.decodeRoutingRulesets() ?: return
-{indent}    val customOutboundTags = rulesetItems
-{indent}        .filter {{ it.enabled && !AppConfig.BUILTIN_OUTBOUND_TAGS.contains(it.outboundTag) }}
-{indent}        .map {{ it.outboundTag }}
-{indent}        .distinct()
+    /**
+     * Injects custom outbounds referenced by routing rules that are not built-in.
+     * Also applies prev/next chaining if the profile belongs to a subscription.
+     */
+    private fun injectCustomOutbounds(v2rayConfig: V2rayConfig) {
+        val existingTags = v2rayConfig.outbounds.mapTo(mutableSetOf()) { it.tag }
+        val outboundTagMap = mutableMapOf<String, String>()
 
-{indent}    for (tag in customOutboundTags) {{
-{indent}        if (tag in existingTags) continue
-{indent}        val profile = SettingsManager.getServerViaRemarks(tag) ?: continue
-{indent}        val outbound = convertProfile2Outbound(profile) ?: continue
-{indent}        outbound.tag = tag
+        val rulesetItems = MmkvManager.decodeRoutingRulesets() ?: return
+        val customOutboundTags = rulesetItems
+            .filter { it.enabled && !AppConfig.BUILTIN_OUTBOUND_TAGS.contains(it.outboundTag) }
+            .map { it.outboundTag }
+            .distinct()
 
-{indent}        applySubscriptionChain(v2rayConfig, profile, outbound, outboundTagMap, existingTags)
+        for (tag in customOutboundTags) {
+            if (tag in existingTags) continue
+            val profile = SettingsManager.getServerViaRemarks(tag) ?: continue
+            val outbound = convertProfile2Outbound(profile) ?: continue
+            outbound.tag = tag
 
-{indent}        v2rayConfig.outbounds.add(outbound)
-{indent}        existingTags.add(tag)
-{indent}        outboundTagMap[tag] = tag
-{indent}        LogUtil.d(AppConfig.TAG, "Injected custom outbound: $tag")
-{indent}    }}
-{indent}}}
-'''
-        c = c[:last_brace] + helpers + c[last_brace:]
-        print("✓ CoreConfigManager: added helper functions before final '}'")
+            applySubscriptionChain(v2rayConfig, profile, outbound, outboundTagMap, existingTags)
+
+            v2rayConfig.outbounds.add(outbound)
+            existingTags.add(tag)
+            outboundTagMap[tag] = tag
+            LogUtil.d(AppConfig.TAG, "Injected custom outbound: $tag")
+        }
+    }
+"""
+        # Insert helpers right before the marker line
+        c = c.replace(marker, helpers_raw + "\n\n    " + marker)
+        print("✓ CoreConfigManager: added helper functions before BalancerStrategy")
     else:
         print("• CoreConfigManager: helpers already present")
 
     # ------------------------------------------------------------------
     # 2. Insert call to injectCustomOutbounds inside buildUnifiedConfig
-    #    Insert right before the comment "// User routing rules (...)"
+    #    Insert right before the comment that starts with "// User routing rules"
     # ------------------------------------------------------------------
     if "injectCustomOutbounds(v2rayConfig)" not in c:
         marker = "// User routing rules (policyGroupBalancerTags rewrites TAG_PROXY→balancer when main is POLICYGROUP)."
@@ -372,7 +375,7 @@ def patch_coreconfig():
 # ─────────────────────────────────────────────────────────────────────────
 def main():
     print("=" * 70)
-    print("Custom Outbound + Enhanced Profile Selector Patcher (Final Reliable)")
+    print("Custom Outbound + Enhanced Profile Selector Patcher (Definitive)")
     print("=" * 70)
 
     files_to_backup = [
