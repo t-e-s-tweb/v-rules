@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unified patcher for v2rayNG (updated for May 2026 upstream).
+Unified patcher for v2rayNG (fully corrected for May 2026 upstream).
 - Adds custom outbound injection with prev/next chaining.
 - Enhances SubEditActivity dropdown with None and [Current Server].
 - Adds AppConfig.CURRENT_SERVER constant.
@@ -211,15 +211,19 @@ def patch_coreconfig():
     c = read(p)
 
     # ------------------------------------------------------------------
-    # 4.1 Add helper functions at the end of the object (before the last '}')
+    # 4.1 Add helper functions at the very end of the object
     # ------------------------------------------------------------------
     if "private fun injectCustomOutbounds" not in c:
-        lines = c.splitlines()
-        # Find the last line that is just '}' (object closing brace)
-        for i in range(len(lines)-1, -1, -1):
-            if lines[i].strip() == '}':
-                indent = '    '
-                helpers = f'''
+        # Remove the final closing brace, append helpers, then re-add the brace
+        if not c.rstrip().endswith('}'):
+            print("✗ CoreConfigManager: file does not end with '}'")
+            return
+        # Strip trailing whitespace and remove the last '}'
+        c = c.rstrip()
+        c = c[:-1]  # remove the last '}'
+        # Append helpers (with indentation of one level)
+        indent = '    '
+        helpers = f'''
 {indent}// ------------------------------------------------------------------
 {indent}// Custom outbound injection with chain proxy support
 {indent}// ------------------------------------------------------------------
@@ -341,36 +345,33 @@ def patch_coreconfig():
 {indent}    }}
 {indent}}}
 '''
-                lines.insert(i, helpers)
-                c = '\n'.join(lines)
-                print("✓ CoreConfigManager: added helper functions at end of object")
-                break
-        else:
-            print("✗ CoreConfigManager: could not find closing brace to insert helpers")
-            return
+        c = c + helpers + '\n}'
+        print("✓ CoreConfigManager: added helper functions at end of object")
     else:
         print("• CoreConfigManager: helpers already present")
 
     # ------------------------------------------------------------------
     # 4.2 Add call to injectCustomOutbounds inside buildUnifiedConfig
     # ------------------------------------------------------------------
-    # Pattern: the loop that builds outbounds, followed by "// User routing rules"
-    pattern = r'(\s+// resolvedOutbounds is a single ordered plan: .+?configContext\.resolvedOutbounds\.forEachIndexed.+?}\n)(\s+// User routing rules)'
-    match = re.search(pattern, c, re.DOTALL)
-    if match:
-        insertion = match.group(1) + '\n        // Inject custom outbounds for routing rules\n        injectCustomOutbounds(v2rayConfig)\n\n        ' + match.group(2)
-        c = c[:match.start()] + insertion + c[match.end():]
-        print("✓ CoreConfigManager: added injectCustomOutbounds call in buildUnifiedConfig")
-    else:
-        # Fallback: insert before configureRouting(...)
-        fallback = re.search(r'\n(\s+)configureRouting\(configContext, v2rayConfig, policyGroupBalancerTags\)', c)
-        if fallback:
-            indent = fallback.group(1)
-            insert_text = f'\n{indent}// Inject custom outbounds for routing rules\n{indent}injectCustomOutbounds(v2rayConfig)\n'
-            c = c[:fallback.start()] + insert_text + c[fallback.start():]
-            print("✓ CoreConfigManager: added injectCustomOutbounds call (fallback before configureRouting)")
+    # We need to insert the call after the outbound-building loop and before routing configuration.
+    # Look for the line that starts "        // User routing rules"
+    if "injectCustomOutbounds(v2rayConfig)" not in c:
+        pattern = r'(\n\s+// User routing rules \(policyGroupBalancerTags rewrites TAG_PROXY→balancer when main is POLICYGROUP\)\.)'
+        match = re.search(pattern, c)
+        if match:
+            insert_text = '\n        // Inject custom outbounds for routing rules\n        injectCustomOutbounds(v2rayConfig)\n'
+            c = c[:match.start()] + insert_text + c[match.start():]
+            print("✓ CoreConfigManager: added injectCustomOutbounds call (before user routing rules)")
         else:
-            print("⚠ CoreConfigManager: could not find insertion point – you may need to manually add 'injectCustomOutbounds(v2rayConfig)' in buildUnifiedConfig")
+            # Fallback: find the line with "configureRouting"
+            fallback = re.search(r'\n(\s+)configureRouting\(configContext, v2rayConfig, policyGroupBalancerTags\)', c)
+            if fallback:
+                indent = fallback.group(1)
+                insert_text = f'\n{indent}// Inject custom outbounds for routing rules\n{indent}injectCustomOutbounds(v2rayConfig)\n'
+                c = c[:fallback.start()] + insert_text + c[fallback.start():]
+                print("✓ CoreConfigManager: added injectCustomOutbounds call (fallback before configureRouting)")
+            else:
+                print("⚠ CoreConfigManager: could not find insertion point – you may need to manually add 'injectCustomOutbounds(v2rayConfig)' in buildUnifiedConfig")
 
     write(p, c)
     print("✓ CoreConfigManager: patched successfully")
