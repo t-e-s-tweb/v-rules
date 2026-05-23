@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Unified patcher for v2rayNG – adds:
-  - Custom outbound subscription chaining (prev/next proxy)
-  - [Current Server] resolve & deduplication
-  - Editable prev/next profile with dropdown including None and [Current Server]
+Updated patcher for v2rayNG (after May 2026 upstream changes).
+- Adds custom outbound injection with prev/next chaining.
+- Enhances SubEditActivity dropdown with None and [Current Server].
 """
 
-import re, sys, shutil
+import re
+import sys
+import shutil
 from pathlib import Path
 from datetime import datetime
 
@@ -22,7 +23,7 @@ def backup_kotlin(p: Path):
 def read(p): return p.read_text(encoding="utf-8")
 def write(p, s): p.write_text(s, encoding="utf-8")
 
-# ── 1. AppConfig.kt ──────────────────────────────────────────────────
+# ── 1. AppConfig.kt (add CURRENT_SERVER if missing) ──────────────────
 def patch_appconfig():
     p = BASE / "app/src/main/java/com/v2ray/ang/AppConfig.kt"
     c = read(p)
@@ -37,7 +38,7 @@ def patch_appconfig():
     else:
         print("✗ AppConfig: insertion point not found")
 
-# ── 2. SubEditActivity.kt – exact method replacements ─────────────────
+# ── 2. SubEditActivity.kt – enhance dropdown with None / Current Server ──
 def patch_subedit():
     p = BASE / "app/src/main/java/com/v2ray/ang/ui/SubEditActivity.kt"
     if not p.exists():
@@ -45,40 +46,33 @@ def patch_subedit():
         return
     c = read(p)
 
-    # Ensure imports
-    if "import android.widget.ArrayAdapter" not in c:
-        c = c.replace(
-            "import android.view.MenuItem",
-            "import android.view.MenuItem\nimport android.widget.ArrayAdapter"
-        )
-    if "import android.widget.AutoCompleteTextView" not in c:
-        c = c.replace(
-            "import android.widget.ArrayAdapter",
-            "import android.widget.ArrayAdapter\nimport android.widget.AutoCompleteTextView"
-        )
+    # Ensure imports (AutoCompleteTextView and ArrayAdapter already present)
+    # We'll replace the three relevant functions.
 
-    # ------------------------------------------------------------------
-    # Replace setupProfileRemarkInputs with version that builds Pair list
-    # ------------------------------------------------------------------
+    # 2.1 Replace setupProfileRemarkInputs
     old_setup_inputs = '''    private fun setupProfileRemarkInputs() {
-        val suggestions = MmkvManager.decodeAllServerList()
-            .mapNotNull { id -> MmkvManager.decodeServerConfig(id)?.remarks }
-            .filter { it.isNotBlank() }
-            .distinct()
+        val suggestions = SettingsManager.getProfileRemarks(
+            excludeConfigTypes = setOf(
+                EConfigType.CUSTOM,
+                EConfigType.POLICYGROUP,
+                EConfigType.PROXYCHAIN,
+            )
+        )
 
         setupProfileRemarkInput(binding.etPreProfile, binding.btnPreProfileDropdown, suggestions)
         setupProfileRemarkInput(binding.etNextProfile, binding.btnNextProfileDropdown, suggestions)
     }'''
 
     new_setup_inputs = '''    private fun setupProfileRemarkInputs() {
-        val suggestions = listOf(
-            "" to getString(R.string.sub_setting_none),
-            AppConfig.CURRENT_SERVER to getString(R.string.sub_setting_current_server)
-        ) + MmkvManager.decodeAllServerList()
-            .mapNotNull { id -> MmkvManager.decodeServerConfig(id)?.remarks }
-            .filter { it.isNotBlank() }
-            .distinct()
-            .map { it to it }
+        val baseSuggestions = SettingsManager.getProfileRemarks(
+            excludeConfigTypes = setOf(
+                EConfigType.CUSTOM,
+                EConfigType.POLICYGROUP,
+                EConfigType.PROXYCHAIN,
+            )
+        )
+        // Prepend None and [Current Server] to the list
+        val suggestions = listOf("None", "[Current Server]") + baseSuggestions
 
         setupProfileRemarkInput(binding.etPreProfile, binding.btnPreProfileDropdown, suggestions)
         setupProfileRemarkInput(binding.etNextProfile, binding.btnNextProfileDropdown, suggestions)
@@ -86,13 +80,11 @@ def patch_subedit():
 
     if old_setup_inputs in c:
         c = c.replace(old_setup_inputs, new_setup_inputs)
-        print("✓ SubEditActivity: replaced setupProfileRemarkInputs")
+        print("✓ SubEditActivity: updated setupProfileRemarkInputs with None and [Current Server]")
     else:
         print("⚠ SubEditActivity: setupProfileRemarkInputs not found (maybe already patched)")
 
-    # ------------------------------------------------------------------
-    # Replace setupProfileRemarkInput with version that handles Pair list
-    # ------------------------------------------------------------------
+    # 2.2 Replace setupProfileRemarkInput to handle mapping on selection
     old_setup_input = '''    private fun setupProfileRemarkInput(
         input: AutoCompleteTextView,
         dropdownButton: ImageButton,
@@ -114,10 +106,9 @@ def patch_subedit():
     new_setup_input = '''    private fun setupProfileRemarkInput(
         input: AutoCompleteTextView,
         dropdownButton: ImageButton,
-        suggestions: List<Pair<String, String>>
+        suggestions: List<String>
     ) {
-        val displayList = suggestions.map { it.second }
-        val adapter = ArrayAdapter(this, android.R.layout.simple_dropdown_item_1line, displayList)
+        val adapter = ArrayAdapter(this, android.R.layout.simple_dropdown_item_1line, suggestions)
         input.setAdapter(adapter)
         input.threshold = 0
 
@@ -129,62 +120,70 @@ def patch_subedit():
             input.showDropDown()
         }
 
+        // When an item is selected, map display text to stored value
         input.setOnItemClickListener { _, _, position, _ ->
-            val storedValue = suggestions[position].first
-            input.setText(storedValue)
+            val selected = suggestions[position]
+            val stored = when (selected) {
+                "None" -> ""
+                "[Current Server]" -> AppConfig.CURRENT_SERVER
+                else -> selected
+            }
+            input.setText(stored)
         }
     }'''
 
     if old_setup_input in c:
         c = c.replace(old_setup_input, new_setup_input)
-        print("✓ SubEditActivity: replaced setupProfileRemarkInput")
+        print("✓ SubEditActivity: updated setupProfileRemarkInput with selection mapping")
     else:
         print("⚠ SubEditActivity: setupProfileRemarkInput not found (maybe already patched)")
 
-    # ------------------------------------------------------------------
-    # Update bindingServer to show friendly display strings
-    # ------------------------------------------------------------------
+    # 2.3 Update bindingServer to display friendly strings
     old_binding = '''        binding.etPreProfile.text = Utils.getEditable(subItem.prevProfile)
         binding.etNextProfile.text = Utils.getEditable(subItem.nextProfile)'''
-    new_binding = '''        val preDisplay = when (subItem.prevProfile) {
-            AppConfig.CURRENT_SERVER -> getString(R.string.sub_setting_current_server)
+    new_binding = '''        // Convert stored values to display strings
+        val preDisplay = when (subItem.prevProfile) {
+            "" -> "None"
+            AppConfig.CURRENT_SERVER -> "[Current Server]"
             else -> subItem.prevProfile
         }
         binding.etPreProfile.setText(preDisplay)
         val nextDisplay = when (subItem.nextProfile) {
-            AppConfig.CURRENT_SERVER -> getString(R.string.sub_setting_current_server)
+            "" -> "None"
+            AppConfig.CURRENT_SERVER -> "[Current Server]"
             else -> subItem.nextProfile
         }
         binding.etNextProfile.setText(nextDisplay)'''
     if old_binding in c:
         c = c.replace(old_binding, new_binding)
-        print("✓ SubEditActivity: updated bindingServer")
+        print("✓ SubEditActivity: updated bindingServer display mapping")
     else:
-        print("⚠ SubEditActivity: bindingServer prev/next lines not found")
+        print("⚠ SubEditActivity: bindingServer lines not found")
 
-    # ------------------------------------------------------------------
-    # Update saveServer to map display back to stored constants
-    # ------------------------------------------------------------------
+    # 2.4 Update saveServer to convert display back to stored values
     old_save = '''        subItem.prevProfile = binding.etPreProfile.text.toString()
         subItem.nextProfile = binding.etNextProfile.text.toString()'''
-    new_save = '''        subItem.prevProfile = when (binding.etPreProfile.text.toString()) {
-            getString(R.string.sub_setting_current_server) -> AppConfig.CURRENT_SERVER
+    new_save = '''        // Convert display strings back to stored values
+        subItem.prevProfile = when (binding.etPreProfile.text.toString()) {
+            "None" -> ""
+            "[Current Server]" -> AppConfig.CURRENT_SERVER
             else -> binding.etPreProfile.text.toString()
         }
         subItem.nextProfile = when (binding.etNextProfile.text.toString()) {
-            getString(R.string.sub_setting_current_server) -> AppConfig.CURRENT_SERVER
+            "None" -> ""
+            "[Current Server]" -> AppConfig.CURRENT_SERVER
             else -> binding.etNextProfile.text.toString()
         }'''
     if old_save in c:
         c = c.replace(old_save, new_save)
-        print("✓ SubEditActivity: updated saveServer")
+        print("✓ SubEditActivity: updated saveServer storage mapping")
     else:
-        print("⚠ SubEditActivity: saveServer prev/next lines not found")
+        print("⚠ SubEditActivity: saveServer lines not found")
 
     write(p, c)
     print("✓ SubEditActivity: all enhancements applied")
 
-# ── 3. strings.xml – add None and [Current Server] ──────────────────
+# ── 3. strings.xml – add None and [Current Server] if missing ─────────
 def patch_strings():
     p = BASE / "app/src/main/res/values/strings.xml"
     c = read(p)
@@ -206,62 +205,38 @@ def patch_strings():
     else:
         print("• strings.xml: already present")
 
-# ── 4. CoreConfigManager.kt – custom chaining (unchanged from your script) ─
+# ── 4. CoreConfigManager.kt – inject custom outbounds with chaining ────
 def patch_coreconfig():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
+    if not p.exists():
+        print("✗ CoreConfigManager.kt not found – skipping")
+        return
     c = read(p)
 
-    # Replace injectCustomOutbounds
-    old_inject = '''    private fun injectCustomOutbounds(v2rayConfig: V2rayConfig, customOutbounds: Map<String, ProfileItem>) {
-        val existingTags = v2rayConfig.outbounds.mapTo(mutableSetOf()) { it.tag }
-
-        customOutbounds.forEach { (tag, profile) ->
-            if (tag in existingTags) return@forEach
-            val outbound = convertProfile2Outbound(profile)
-                ?: error("Could not convert profile '$tag' to outbound")
-            outbound.tag = tag
-            v2rayConfig.outbounds.add(outbound)
-            existingTags.add(tag)
-            LogUtil.d(AppConfig.TAG, "Injected custom outbound: tag='$tag'")
-        }
-    }'''
-
-    new_inject = '''    private fun injectCustomOutbounds(v2rayConfig: V2rayConfig, customOutbounds: Map<String, ProfileItem>) {
-        val existingTags = v2rayConfig.outbounds.mapTo(mutableSetOf()) { it.tag }
-        val outboundTagMap = mutableMapOf<String, String>()
-
-        customOutbounds.forEach { (tag, profile) ->
-            if (outboundTagMap.containsKey(tag)) {
-                LogUtil.d(AppConfig.TAG, "Custom outbound '$tag' already injected, skipping")
-                return@forEach
-            }
-            val outbound = convertProfile2Outbound(profile)
-                ?: error("Could not convert profile '$tag' to outbound")
-            outbound.tag = tag
-
-            applySubscriptionChain(v2rayConfig, profile, outbound, outboundTagMap, existingTags)
-
-            v2rayConfig.outbounds.add(outbound)
-            existingTags.add(tag)
-            outboundTagMap[tag] = tag
-            LogUtil.d(AppConfig.TAG, "Injected custom outbound: tag='$tag'")
-        }
-    }'''
-
-    if old_inject in c:
-        c = c.replace(old_inject, new_inject)
-        print("✓ CoreConfig: injectCustomOutbounds → chain-enabled")
-    else:
-        print("✗ CoreConfig: injectCustomOutbounds block not found – maybe already patched?")
-
-    # Insert resolveCurrentServer and applySubscriptionChain
-    routing_pat = re.compile(r'(\n    private fun getRouting\(configContext: CoreConfigContext,)')
-    m = re.search(routing_pat, c)
-    if not m:
-        print("✗ CoreConfig: getRouting anchor not found")
+    # 4.1 Add helper functions: resolveCurrentServer, applySubscriptionChain, injectCustomOutbounds
+    # We'll insert them before the first private fun (e.g., before "private fun buildUnifiedConfig")
+    # or at the end of the file. Let's insert after the existing imports and before the object.
+    # Actually, we can insert after the object declaration.
+    marker = "object CoreConfigManager {"
+    if marker not in c:
+        print("✗ CoreConfigManager: object declaration not found")
         return
 
-    resolve_func = '''
+    # Check if already patched
+    if "private fun injectCustomOutbounds" in c:
+        print("• CoreConfigManager: already patched (injectCustomOutbounds exists)")
+        # Still need to ensure the call is in buildUnifiedConfig? We'll try to add call anyway.
+    else:
+        # Prepare the helper functions block
+        helpers = '''
+
+    // ------------------------------------------------------------------
+    // Custom outbound injection with chain proxy support
+    // ------------------------------------------------------------------
+
+    /**
+     * Resolves [Current Server] placeholder to the actual selected server's remark.
+     */
     private fun resolveCurrentServer(remark: String?): String? {
         if (remark == AppConfig.CURRENT_SERVER) {
             val currId = MmkvManager.getSelectServer()
@@ -273,6 +248,9 @@ def patch_coreconfig():
         return remark
     }
 
+    /**
+     * Applies subscription chain (prev/next proxy) to a custom outbound.
+     */
     private fun applySubscriptionChain(
         v2rayConfig: V2rayConfig,
         profile: ProfileItem,
@@ -293,6 +271,7 @@ def patch_coreconfig():
         ) {
             if (targetRemark.isNullOrEmpty()) return
 
+            // Check if already added
             val existingByTag = v2rayConfig.outbounds.firstOrNull { it.tag == desiredTag }
             if (existingByTag != null) {
                 chainTo(existingByTag)
@@ -343,24 +322,80 @@ def patch_coreconfig():
             }
         }
     }
+
+    /**
+     * Injects custom outbounds referenced by routing rules that are not built-in.
+     * Also applies prev/next chaining if the profile belongs to a subscription.
+     */
+    private fun injectCustomOutbounds(v2rayConfig: V2rayConfig) {
+        val existingTags = v2rayConfig.outbounds.mapTo(mutableSetOf()) { it.tag }
+        val outboundTagMap = mutableMapOf<String, String>()
+
+        val rulesetItems = MmkvManager.decodeRoutingRulesets() ?: return
+        val customOutboundTags = rulesetItems
+            .filter { it.enabled && !AppConfig.BUILTIN_OUTBOUND_TAGS.contains(it.outboundTag) }
+            .map { it.outboundTag }
+            .distinct()
+
+        for (tag in customOutboundTags) {
+            if (tag in existingTags) continue
+            val profile = SettingsManager.getServerViaRemarks(tag) ?: continue
+            val outbound = convertProfile2Outbound(profile) ?: continue
+            outbound.tag = tag
+
+            // Apply chaining if subscriptionId exists
+            applySubscriptionChain(v2rayConfig, profile, outbound, outboundTagMap, existingTags)
+
+            v2rayConfig.outbounds.add(outbound)
+            existingTags.add(tag)
+            outboundTagMap[tag] = tag
+            LogUtil.d(AppConfig.TAG, "Injected custom outbound: $tag")
+        }
+    }
 '''
-    c = c[:m.start()] + resolve_func + c[m.start():]
-    print("✓ CoreConfig: inserted resolveCurrentServer + applySubscriptionChain")
+        # Insert after the object line
+        insert_pos = c.index(marker) + len(marker)
+        c = c[:insert_pos] + helpers + c[insert_pos:]
+        print("✓ CoreConfigManager: added helper functions (resolveCurrentServer, applySubscriptionChain, injectCustomOutbounds)")
+
+    # 4.2 Call injectCustomOutbounds inside buildUnifiedConfig after outbounds are built
+    # Find the place after the loop that builds outbounds from resolvedOutbounds.
+    # In buildUnifiedConfig, after the forEachIndexed block that calls buildOutbounds, we add a call.
+    # We'll look for the line that closes the loop and before configureRouting.
+    # Specifically, after the line: "        }" (the end of the forEachIndexed) and before "configureRouting".
+    # Use a regex to locate the pattern.
+    pattern = r'(        // resolvedOutbounds is a single ordered plan: index 0 is primary and must be prepended,\n        // the rest are routing outbounds and can be appended.\n        configContext.resolvedOutbounds.forEachIndexed { index, spec ->\n            buildOutbounds\(\n                resolvedOutbound = spec,\n                prepend = index == 0,\n                existingTags = existingTags,\n                v2rayConfig = v2rayConfig,\n                policyGroupBalancerTags = policyGroupBalancerTags,\n                balancerStrategies = balancerStrategies,\n            \)\n        }\n)'
+    match = re.search(pattern, c, re.DOTALL)
+    if match:
+        insertion_point = match.end()
+        # Insert injectCustomOutbounds right after the closing brace of the loop
+        c = c[:insertion_point] + '\n\n        // Inject any custom outbounds referenced by routing rules\n        injectCustomOutbounds(v2rayConfig)\n' + c[insertion_point:]
+        print("✓ CoreConfigManager: added injectCustomOutbounds call in buildUnifiedConfig")
+    else:
+        # Fallback: try to find a simpler pattern
+        fallback = "        // User routing rules (policyGroupBalancerTags rewrites TAG_PROXY→balancer when main is POLICYGROUP)."
+        if fallback in c:
+            c = c.replace(fallback, "        injectCustomOutbounds(v2rayConfig)\n\n        " + fallback)
+            print("✓ CoreConfigManager: added injectCustomOutbounds call (fallback)")
+        else:
+            print("⚠ CoreConfigManager: could not locate insertion point for injectCustomOutbounds call – you may need to manually add it after the outbound building loop in buildUnifiedConfig")
 
     write(p, c)
+    print("✓ CoreConfigManager: patched successfully")
 
 # ── main ──────────────────────────────────────────────────────────────
 def main():
     print("=" * 70)
-    print("Custom Outbound + Enhanced Profile Selector Patcher (Exact Match)")
+    print("Custom Outbound + Enhanced Profile Selector Patcher (Updated for May 2026)")
     print("=" * 70)
 
-    for f in [
+    files_to_backup = [
         BASE / "app/src/main/java/com/v2ray/ang/AppConfig.kt",
         BASE / "app/src/main/java/com/v2ray/ang/ui/SubEditActivity.kt",
         BASE / "app/src/main/res/values/strings.xml",
         BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt",
-    ]:
+    ]
+    for f in files_to_backup:
         if f.exists():
             backup_kotlin(f)
 
@@ -370,7 +405,7 @@ def main():
         patch_strings()
         patch_coreconfig()
         print("\n✅ All patches applied successfully.")
-        print("👉 Rebuild and test – you will now see 'None' and '[Current Server]' in the dropdown.")
+        print("👉 Rebuild and test – None and [Current Server] will appear in dropdown, and custom outbounds will be injected with chain support.")
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback; traceback.print_exc()
