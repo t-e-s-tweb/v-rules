@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Final patcher – fully upstream‑compatible.
-- Reuses "proxy" outbound when a chain hop equals current main server.
-- No duplicate numbered hops (proxy-twitter-1) for the main server.
-- All other functionality intact.
+Final patcher – uses remark comparison (trimmed, case‑insensitive) to reuse the main server.
+- No 'guid' references (ProfileItem has no guid).
+- Fully upstream‑compatible.
 """
 
 import re
@@ -266,7 +265,7 @@ def patch_coreconfigcontextbuilder():
     write(p, c)
 
 # ----------------------------------------------------------------------
-# Patched CoreConfigManager with GUID‑based reuse in chain handler
+# Patched CoreConfigManager.kt – remark‑based reuse (no guid)
 # ----------------------------------------------------------------------
 PATCHED_CORECONFIG_MANAGER = r'''package com.v2ray.ang.core
 
@@ -506,9 +505,11 @@ object CoreConfigManager {
         existingTags.add(resolvedOutbound.tag)
     }
 
-    private fun getCurrentMainServerGuid(): String? {
+    private fun getCurrentMainServerRemarks(): String? {
         val currId = MmkvManager.getSelectServer()
-        return if (!currId.isNullOrEmpty()) currId else null
+        return if (!currId.isNullOrEmpty()) {
+            MmkvManager.decodeServerConfig(currId)?.remarks?.trim()
+        } else null
     }
 
     private fun handleProxyChainResolvedOutbound(
@@ -521,27 +522,26 @@ object CoreConfigManager {
         LogUtil.d(AppConfig.TAG, "🔗 Processing PROXYCHAIN for tag='${resolvedOutbound.tag}', prepend=$prepend")
         LogUtil.d(AppConfig.TAG, "   Number of resolvedProfiles: ${resolvedOutbound.resolvedProfiles.size}")
         
-        val mainGuid = getCurrentMainServerGuid()
-        LogUtil.d(AppConfig.TAG, "   Current main server GUID: $mainGuid")
+        val mainRemarks = getCurrentMainServerRemarks()
+        LogUtil.d(AppConfig.TAG, "   Current main server remarks: '$mainRemarks'")
         
-        // List of outbounds we will actually add (may skip main server ones)
-        val finalOutbounds = mutableListOf<V2rayConfig.OutboundBean>()
-        val finalTags = mutableListOf<String>()
-        
-        // Convert each profile to an outbound, but if it's the main server, we skip adding it and just remember to chain to "proxy"
+        // List of outbounds we will actually add (skipping main server ones)
         var prevOutboundTag: String? = null
+        var hopIndex = 0
         
-        for ((index, profile) in resolvedOutbound.resolvedProfiles.withIndex()) {
-            val isMainServer = profile.guid == mainGuid
-            val desiredTag = if (index == 0) {
+        for ((profileIndex, profile) in resolvedOutbound.resolvedProfiles.withIndex()) {
+            val profileRemarks = profile.remarks.trim()
+            val isMainServer = mainRemarks != null && profileRemarks.equals(mainRemarks, ignoreCase = true)
+            
+            // Determine desired tag if we were to create an outbound
+            val desiredTag = if (profileIndex == 0) {
                 resolvedOutbound.tag
             } else {
-                "${AppConfig.TAG_PROXY}-${resolvedOutbound.tag}-$index"
+                "${AppConfig.TAG_PROXY}-${resolvedOutbound.tag}-${profileIndex}"
             }
             
             if (isMainServer) {
-                LogUtil.d(AppConfig.TAG, "♻️ Hop $index is current main server (${profile.remarks}) – will chain to 'proxy'")
-                // Set the previous outbound's dialerProxy to "proxy" (if we have a previous outbound)
+                LogUtil.d(AppConfig.TAG, "♻️ Hop $profileIndex is current main server ('$profileRemarks') – chaining to 'proxy'")
                 if (prevOutboundTag != null) {
                     val prevOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == prevOutboundTag }
                     if (prevOutbound != null) {
@@ -551,11 +551,11 @@ object CoreConfigManager {
                         LogUtil.e(AppConfig.TAG, "❌ Previous outbound '$prevOutboundTag' not found")
                     }
                 }
-                // Do NOT add a new outbound for this hop; continue without updating prevOutboundTag
+                // Do not add a new outbound; do not update prevOutboundTag
                 continue
             }
             
-            // Not main server – convert profile to outbound
+            // Convert profile to outbound
             val outbound = convertProfile2Outbound(profile)
             if (outbound == null) {
                 LogUtil.e(AppConfig.TAG, "❌ Failed to convert profile '${profile.remarks}' (type=${profile.configType})")
@@ -588,8 +588,6 @@ object CoreConfigManager {
             }
             existingTags.add(desiredTag)
             outboundTagMap[mapKey] = desiredTag
-            finalOutbounds.add(outbound)
-            finalTags.add(desiredTag)
             
             // Wire from previous to this new outbound
             if (prevOutboundTag != null) {
@@ -601,7 +599,7 @@ object CoreConfigManager {
         }
         
         // If we never added any new outbounds (all hops were main server), then the custom outbound itself should dial directly to "proxy"
-        if (finalOutbounds.isEmpty()) {
+        if (prevOutboundTag == null) {
             val customOutboundTag = resolvedOutbound.tag
             val customOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == customOutboundTag }
             if (customOutbound != null) {
@@ -1141,8 +1139,8 @@ object CoreConfigManager {
         LogUtil.d(AppConfig.TAG, "🔗 Applying chain for '$originalTag' using subscription ${subItem.remarks}")
         LogUtil.d(AppConfig.TAG, "   prevProfile='${subItem.prevProfile}', nextProfile='${subItem.nextProfile}'")
 
-        val currentMainGuid = getCurrentMainServerGuid()
-        LogUtil.d(AppConfig.TAG, "   Current main server GUID: '$currentMainGuid'")
+        val currentMainRemarks = getCurrentMainServerRemarks()
+        LogUtil.d(AppConfig.TAG, "   Current main server remarks: '$currentMainRemarks'")
 
         fun addChainOutbound(
             targetRemark: String?,
@@ -1150,7 +1148,7 @@ object CoreConfigManager {
             desiredTag: String,
             chainTo: (V2rayConfig.OutboundBean) -> Unit
         ) {
-            val resolvedRemark = resolveCurrentServer(targetRemark)
+            val resolvedRemark = resolveCurrentServer(targetRemark)?.trim()
             if (resolvedRemark.isNullOrEmpty()) {
                 LogUtil.d(AppConfig.TAG, "⚠️ $chainType target is empty or None, skipping")
                 return
@@ -1158,9 +1156,7 @@ object CoreConfigManager {
 
             LogUtil.d(AppConfig.TAG, "   $chainType resolved remark: '$resolvedRemark'")
             
-            val resolvedProfile = SettingsManager.getServerViaRemarks(resolvedRemark)
-            val isCurrentMain = currentMainGuid != null && resolvedProfile != null && 
-                resolvedProfile.guid == currentMainGuid
+            val isCurrentMain = currentMainRemarks != null && resolvedRemark.equals(currentMainRemarks, ignoreCase = true)
             
             if (isCurrentMain) {
                 LogUtil.d(AppConfig.TAG, "✅ $chainType target matches current main server! Reusing main outbound '${AppConfig.TAG_PROXY}'")
@@ -1279,11 +1275,11 @@ def patch_coreconfigmanager():
         return
     backup_kotlin(p)
     write(p, PATCHED_CORECONFIG_MANAGER)
-    print("✓ CoreConfigManager.kt replaced – reuses 'proxy' when hop equals current main server")
+    print("✓ CoreConfigManager.kt replaced – remark‑based reuse (no guid)")
 
 def main():
     print("=" * 70)
-    print("Final Upstream‑Compatible Patcher – No duplicate numbered hops for main server")
+    print("Final Remark‑Based Patcher – No GUID references, compiles cleanly")
     print("=" * 70)
 
     try:
@@ -1293,8 +1289,7 @@ def main():
         patch_coreconfigcontextbuilder()
         patch_coreconfigmanager()
         print("\n✅ All patches applied successfully.")
-        print("👉 Rebuild and test – now when a chain hop equals the current main server,")
-        print("   it will reuse the 'proxy' outbound instead of creating proxy-twitter-1.")
+        print("👉 Rebuild and test – now the main server is detected by remark comparison.")
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback
