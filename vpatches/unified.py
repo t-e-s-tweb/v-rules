@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Complete final patcher for v2rayNG – all fixes included.
-- Adds None / [Current Server] to subscription editor.
-- Resolves [Current Server] in proxy chains.
-- Reuses current main server instead of creating duplicate outbounds.
-- Full chain deduplication and custom outbound injection.
+Final patcher with improved [Current Server] handling.
+- Adds robust comparison (trim, case-insensitive fallback).
+- Detailed logging to diagnose mismatches.
+- Reuses main outbound (tag "proxy") when target is current server.
 """
 
 import re
@@ -267,7 +266,7 @@ def patch_coreconfigcontextbuilder():
     write(p, c)
 
 # ----------------------------------------------------------------------
-# Complete patched CoreConfigManager.kt
+# Complete patched CoreConfigManager.kt with robust current server detection
 # ----------------------------------------------------------------------
 PATCHED_CORECONFIG_MANAGER = r'''package com.v2ray.ang.core
 
@@ -1123,11 +1122,11 @@ object CoreConfigManager {
         LogUtil.d(AppConfig.TAG, "🔗 Applying chain for '$originalTag' using subscription ${subItem.remarks}")
         LogUtil.d(AppConfig.TAG, "   prevProfile='${subItem.prevProfile}', nextProfile='${subItem.nextProfile}'")
 
-        // Get current main server remarks for comparison
-        val currentMainRemarks = MmkvManager.getSelectServer()?.let { 
-            MmkvManager.decodeServerConfig(it)?.remarks 
-        }
-        LogUtil.d(AppConfig.TAG, "   Current main server remarks: '$currentMainRemarks'")
+        // Get current main server GUID and remarks for robust comparison
+        val currentMainGuid = MmkvManager.getSelectServer()
+        val currentMainProfile = currentMainGuid?.let { MmkvManager.decodeServerConfig(it) }
+        val currentMainRemarks = currentMainProfile?.remarks?.trim()
+        LogUtil.d(AppConfig.TAG, "   Current main server: GUID='$currentMainGuid', remarks='$currentMainRemarks'")
 
         fun addChainOutbound(
             targetRemark: String?,
@@ -1135,7 +1134,7 @@ object CoreConfigManager {
             desiredTag: String,
             chainTo: (V2rayConfig.OutboundBean) -> Unit
         ) {
-            val resolvedRemark = resolveCurrentServer(targetRemark)
+            val resolvedRemark = resolveCurrentServer(targetRemark)?.trim()
             if (resolvedRemark.isNullOrEmpty()) {
                 LogUtil.d(AppConfig.TAG, "⚠️ $chainType target is empty or None, skipping")
                 return
@@ -1143,9 +1142,14 @@ object CoreConfigManager {
 
             LogUtil.d(AppConfig.TAG, "   $chainType resolved to: '$resolvedRemark'")
             
-            // If the resolved remark is the current main server, just set dialerProxy to "proxy"
-            if (resolvedRemark == currentMainRemarks) {
-                LogUtil.d(AppConfig.TAG, "✅ $chainType target is current main server, setting dialerProxy to '${AppConfig.TAG_PROXY}'")
+            // Check if resolved remark matches current main server (by exact trimmed string, case-insensitive fallback)
+            val isCurrentMain = currentMainRemarks != null && (
+                resolvedRemark.equals(currentMainRemarks, ignoreCase = true) ||
+                resolvedRemark.equals(currentMainRemarks, ignoreCase = false)
+            )
+            
+            if (isCurrentMain) {
+                LogUtil.d(AppConfig.TAG, "✅ $chainType target matches current main server! Reusing main outbound '${AppConfig.TAG_PROXY}'")
                 val mainOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == AppConfig.TAG_PROXY }
                 if (mainOutbound != null) {
                     chainTo(mainOutbound)
@@ -1262,11 +1266,11 @@ def patch_coreconfigmanager():
         return
     backup_kotlin(p)
     write(p, PATCHED_CORECONFIG_MANAGER)
-    print("✓ CoreConfigManager.kt replaced with complete final version")
+    print("✓ CoreConfigManager.kt replaced with robust current server detection")
 
 def main():
     print("=" * 70)
-    print("Complete Final Patcher – all fixes included")
+    print("Final Patcher – robust [Current Server] handling with logging")
     print("=" * 70)
 
     try:
@@ -1276,11 +1280,8 @@ def main():
         patch_coreconfigcontextbuilder()
         patch_coreconfigmanager()
         print("\n✅ All patches applied successfully.")
-        print("👉 Rebuild and test. The patcher now:")
-        print("   • Adds None / [Current Server] to subscription dropdown")
-        print("   • Resolves [Current Server] in prev/next profiles")
-        print("   • Reuses current main server instead of creating duplicate outbounds")
-        print("   • Provides full chain deduplication")
+        print("👉 Rebuild and check logs for 'Current main server' messages.")
+        print("   The patcher now trims and case-insensitively compares remarks.")
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback
