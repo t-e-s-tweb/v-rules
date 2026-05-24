@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Final patcher with improved [Current Server] handling.
-- Adds robust comparison (trim, case-insensitive fallback).
-- Detailed logging to diagnose mismatches.
-- Reuses main outbound (tag "proxy") when target is current server.
+Final patcher – fully upstream‑compatible.
+- Reuses "proxy" outbound when a chain hop equals current main server.
+- No duplicate numbered hops (proxy-twitter-1) for the main server.
+- All other functionality intact.
 """
 
 import re
@@ -266,7 +266,7 @@ def patch_coreconfigcontextbuilder():
     write(p, c)
 
 # ----------------------------------------------------------------------
-# Complete patched CoreConfigManager.kt with robust current server detection
+# Patched CoreConfigManager with GUID‑based reuse in chain handler
 # ----------------------------------------------------------------------
 PATCHED_CORECONFIG_MANAGER = r'''package com.v2ray.ang.core
 
@@ -506,6 +506,11 @@ object CoreConfigManager {
         existingTags.add(resolvedOutbound.tag)
     }
 
+    private fun getCurrentMainServerGuid(): String? {
+        val currId = MmkvManager.getSelectServer()
+        return if (!currId.isNullOrEmpty()) currId else null
+    }
+
     private fun handleProxyChainResolvedOutbound(
         resolvedOutbound: CoreConfigContext.ResolvedOutbound,
         prepend: Boolean,
@@ -516,78 +521,92 @@ object CoreConfigManager {
         LogUtil.d(AppConfig.TAG, "🔗 Processing PROXYCHAIN for tag='${resolvedOutbound.tag}', prepend=$prepend")
         LogUtil.d(AppConfig.TAG, "   Number of resolvedProfiles: ${resolvedOutbound.resolvedProfiles.size}")
         
-        val chainOutboundsWithProfiles = resolvedOutbound.resolvedProfiles
-            .mapNotNull { profile ->
-                LogUtil.d(AppConfig.TAG, "   Converting profile: remarks='${profile.remarks}', type=${profile.configType}, server='${profile.server}'")
-                val outbound = convertProfile2Outbound(profile)
-                if (outbound == null) {
-                    LogUtil.e(AppConfig.TAG, "   ❌ FAILED to convert profile '${profile.remarks}' (type=${profile.configType})")
-                }
-                outbound?.let { profile to it }
-            }
-            .toMutableList()
-            
-        LogUtil.d(AppConfig.TAG, "   Successfully converted ${chainOutboundsWithProfiles.size}/${resolvedOutbound.resolvedProfiles.size} profiles")
+        val mainGuid = getCurrentMainServerGuid()
+        LogUtil.d(AppConfig.TAG, "   Current main server GUID: $mainGuid")
         
-        if (chainOutboundsWithProfiles.isEmpty()) {
-            LogUtil.w(AppConfig.TAG, "PROXYCHAIN resolved outbound '${resolvedOutbound.tag}' has no valid profiles, skipping")
-            return
-        }
-        if (chainOutboundsWithProfiles.size == 1) {
-            val (profile, outbound) = chainOutboundsWithProfiles.first()
-            LogUtil.w(AppConfig.TAG, "⚠️ Only one profile converted: '${profile.remarks}'. Treating as single-hop (no chain)")
-            outbound.tag = resolvedOutbound.tag
-            if (prepend) {
-                v2rayConfig.outbounds.add(0, outbound)
-            } else {
-                v2rayConfig.outbounds.add(outbound)
-            }
-            existingTags.add(resolvedOutbound.tag)
-            LogUtil.d(AppConfig.TAG, "✅ Added as single-hop outbound '${resolvedOutbound.tag}'")
-            return
-        }
-
-        val chainTags = chainOutboundsWithProfiles.mapIndexed { index, (profile, _) ->
-            if (index == 0) {
+        // List of outbounds we will actually add (may skip main server ones)
+        val finalOutbounds = mutableListOf<V2rayConfig.OutboundBean>()
+        val finalTags = mutableListOf<String>()
+        
+        // Convert each profile to an outbound, but if it's the main server, we skip adding it and just remember to chain to "proxy"
+        var prevOutboundTag: String? = null
+        
+        for ((index, profile) in resolvedOutbound.resolvedProfiles.withIndex()) {
+            val isMainServer = profile.guid == mainGuid
+            val desiredTag = if (index == 0) {
                 resolvedOutbound.tag
             } else {
-                val dedupKey = "chain-${profile.remarks}"
-                outboundTagMap[dedupKey]?.let {
-                    LogUtil.d(AppConfig.TAG, "♻️ Reusing existing hop for '${profile.remarks}' as tag '$it'")
-                    return@mapIndexed it
+                "${AppConfig.TAG_PROXY}-${resolvedOutbound.tag}-$index"
+            }
+            
+            if (isMainServer) {
+                LogUtil.d(AppConfig.TAG, "♻️ Hop $index is current main server (${profile.remarks}) – will chain to 'proxy'")
+                // Set the previous outbound's dialerProxy to "proxy" (if we have a previous outbound)
+                if (prevOutboundTag != null) {
+                    val prevOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == prevOutboundTag }
+                    if (prevOutbound != null) {
+                        prevOutbound.ensureSockopt().dialerProxy = AppConfig.TAG_PROXY
+                        LogUtil.d(AppConfig.TAG, "🔗 Set dialerProxy of '$prevOutboundTag' → 'proxy' (main server)")
+                    } else {
+                        LogUtil.e(AppConfig.TAG, "❌ Previous outbound '$prevOutboundTag' not found")
+                    }
                 }
-                val tag = "${AppConfig.TAG_PROXY}-${resolvedOutbound.tag}-$index"
-                outboundTagMap[dedupKey] = tag
-                LogUtil.d(AppConfig.TAG, "🆕 Creating new hop tag '$tag' for '${profile.remarks}'")
-                tag
+                // Do NOT add a new outbound for this hop; continue without updating prevOutboundTag
+                continue
             }
-        }
-
-        chainOutboundsWithProfiles.forEachIndexed { index, (_, outbound) ->
-            val tag = chainTags[index]
-            outbound.tag = tag
-            if (tag in existingTags) {
-                LogUtil.d(AppConfig.TAG, "⏩ Hop tag '$tag' already exists, skipping addition")
-                return@forEachIndexed
+            
+            // Not main server – convert profile to outbound
+            val outbound = convertProfile2Outbound(profile)
+            if (outbound == null) {
+                LogUtil.e(AppConfig.TAG, "❌ Failed to convert profile '${profile.remarks}' (type=${profile.configType})")
+                continue
             }
+            outbound.tag = desiredTag
+            
+            // Deduplication via outboundTagMap
+            val mapKey = "chain-${profile.remarks}"
+            val existingTag = outboundTagMap[mapKey]
+            if (existingTag != null) {
+                val existingOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == existingTag }
+                if (existingOutbound != null) {
+                    // Reuse existing outbound
+                    if (prevOutboundTag != null) {
+                        val prevOut = v2rayConfig.outbounds.firstOrNull { it.tag == prevOutboundTag }
+                        prevOut?.ensureSockopt()?.dialerProxy = existingTag
+                        LogUtil.d(AppConfig.TAG, "🔗 Reused existing hop $existingTag, wired from $prevOutboundTag")
+                    }
+                    prevOutboundTag = existingTag
+                    continue
+                }
+            }
+            
+            // New outbound
             if (prepend) {
                 v2rayConfig.outbounds.add(0, outbound)
             } else {
                 v2rayConfig.outbounds.add(outbound)
             }
-            existingTags.add(tag)
-            LogUtil.d(AppConfig.TAG, "➕ Added outbound with tag '$tag'")
+            existingTags.add(desiredTag)
+            outboundTagMap[mapKey] = desiredTag
+            finalOutbounds.add(outbound)
+            finalTags.add(desiredTag)
+            
+            // Wire from previous to this new outbound
+            if (prevOutboundTag != null) {
+                val prevOut = v2rayConfig.outbounds.firstOrNull { it.tag == prevOutboundTag }
+                prevOut?.ensureSockopt()?.dialerProxy = desiredTag
+                LogUtil.d(AppConfig.TAG, "🔗 Wired $prevOutboundTag → $desiredTag")
+            }
+            prevOutboundTag = desiredTag
         }
-
-        for (i in 0 until chainTags.size - 1) {
-            val currentTag = chainTags[i]
-            val nextTag = chainTags[i + 1]
-            val currentOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == currentTag }
-            if (currentOutbound != null) {
-                currentOutbound.ensureSockopt().dialerProxy = nextTag
-                LogUtil.d(AppConfig.TAG, "🔗 Set dialerProxy of '$currentTag' → '$nextTag'")
-            } else {
-                LogUtil.e(AppConfig.TAG, "❌ Could not find outbound with tag '$currentTag' to set dialerProxy")
+        
+        // If we never added any new outbounds (all hops were main server), then the custom outbound itself should dial directly to "proxy"
+        if (finalOutbounds.isEmpty()) {
+            val customOutboundTag = resolvedOutbound.tag
+            val customOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == customOutboundTag }
+            if (customOutbound != null) {
+                customOutbound.ensureSockopt().dialerProxy = AppConfig.TAG_PROXY
+                LogUtil.d(AppConfig.TAG, "🔗 All hops are main server – set dialerProxy of '$customOutboundTag' → 'proxy'")
             }
         }
     }
@@ -1122,11 +1141,8 @@ object CoreConfigManager {
         LogUtil.d(AppConfig.TAG, "🔗 Applying chain for '$originalTag' using subscription ${subItem.remarks}")
         LogUtil.d(AppConfig.TAG, "   prevProfile='${subItem.prevProfile}', nextProfile='${subItem.nextProfile}'")
 
-        // Get current main server GUID and remarks for robust comparison
-        val currentMainGuid = MmkvManager.getSelectServer()
-        val currentMainProfile = currentMainGuid?.let { MmkvManager.decodeServerConfig(it) }
-        val currentMainRemarks = currentMainProfile?.remarks?.trim()
-        LogUtil.d(AppConfig.TAG, "   Current main server: GUID='$currentMainGuid', remarks='$currentMainRemarks'")
+        val currentMainGuid = getCurrentMainServerGuid()
+        LogUtil.d(AppConfig.TAG, "   Current main server GUID: '$currentMainGuid'")
 
         fun addChainOutbound(
             targetRemark: String?,
@@ -1134,19 +1150,17 @@ object CoreConfigManager {
             desiredTag: String,
             chainTo: (V2rayConfig.OutboundBean) -> Unit
         ) {
-            val resolvedRemark = resolveCurrentServer(targetRemark)?.trim()
+            val resolvedRemark = resolveCurrentServer(targetRemark)
             if (resolvedRemark.isNullOrEmpty()) {
                 LogUtil.d(AppConfig.TAG, "⚠️ $chainType target is empty or None, skipping")
                 return
             }
 
-            LogUtil.d(AppConfig.TAG, "   $chainType resolved to: '$resolvedRemark'")
+            LogUtil.d(AppConfig.TAG, "   $chainType resolved remark: '$resolvedRemark'")
             
-            // Check if resolved remark matches current main server (by exact trimmed string, case-insensitive fallback)
-            val isCurrentMain = currentMainRemarks != null && (
-                resolvedRemark.equals(currentMainRemarks, ignoreCase = true) ||
-                resolvedRemark.equals(currentMainRemarks, ignoreCase = false)
-            )
+            val resolvedProfile = SettingsManager.getServerViaRemarks(resolvedRemark)
+            val isCurrentMain = currentMainGuid != null && resolvedProfile != null && 
+                resolvedProfile.guid == currentMainGuid
             
             if (isCurrentMain) {
                 LogUtil.d(AppConfig.TAG, "✅ $chainType target matches current main server! Reusing main outbound '${AppConfig.TAG_PROXY}'")
@@ -1160,7 +1174,6 @@ object CoreConfigManager {
                 return
             }
 
-            // Check if already added
             val existingByTag = v2rayConfig.outbounds.firstOrNull { it.tag == desiredTag }
             if (existingByTag != null) {
                 chainTo(existingByTag)
@@ -1266,11 +1279,11 @@ def patch_coreconfigmanager():
         return
     backup_kotlin(p)
     write(p, PATCHED_CORECONFIG_MANAGER)
-    print("✓ CoreConfigManager.kt replaced with robust current server detection")
+    print("✓ CoreConfigManager.kt replaced – reuses 'proxy' when hop equals current main server")
 
 def main():
     print("=" * 70)
-    print("Final Patcher – robust [Current Server] handling with logging")
+    print("Final Upstream‑Compatible Patcher – No duplicate numbered hops for main server")
     print("=" * 70)
 
     try:
@@ -1280,8 +1293,8 @@ def main():
         patch_coreconfigcontextbuilder()
         patch_coreconfigmanager()
         print("\n✅ All patches applied successfully.")
-        print("👉 Rebuild and check logs for 'Current main server' messages.")
-        print("   The patcher now trims and case-insensitively compares remarks.")
+        print("👉 Rebuild and test – now when a chain hop equals the current main server,")
+        print("   it will reuse the 'proxy' outbound instead of creating proxy-twitter-1.")
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback
