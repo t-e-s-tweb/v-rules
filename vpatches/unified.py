@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-v2rayNG patcher – stable-base version.
+v2rayNG patcher – stable-base, no-backup version.
 - Idempotent: safe to run multiple times.
 - count=1 on every replacement.
 - Adds CURRENT_SERVER support + chain-hop deduplication.
@@ -8,25 +8,16 @@ v2rayNG patcher – stable-base version.
 
 import re
 import sys
-import shutil
 from pathlib import Path
-from datetime import datetime
 
 BASE = Path("V2rayNG")
-
-def backup(p: Path):
-    if p.exists():
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        bak = p.with_suffix(f".kt.bak.{ts}")
-        shutil.copy2(p, bak)
-        print(f"  backup: {bak.name}")
 
 def read(p): return p.read_text(encoding="utf-8")
 def write(p, s): p.write_text(s, encoding="utf-8")
 
 def main():
     print("=" * 70)
-    print("v2rayNG Patcher (Stable Base)")
+    print("v2rayNG Patcher (Stable Base – No Backups)")
     print("=" * 70)
 
     # ── Pre-flight: CoreConfigManager must be clean ──
@@ -35,20 +26,8 @@ def main():
         ccm = read(ccm_path)
         if "injectCustomOutbounds" in ccm or "applySubscriptionChain" in ccm:
             print("\n❌ CoreConfigManager.kt still contains old-patch artifacts!")
-            print("   Restore it first, e.g.:")
-            print("   cp CoreConfigManager.kt.bak.<timestamp> CoreConfigManager.kt")
+            print("   Restore it from your clean base before running this script.")
             sys.exit(1)
-
-    files = [
-        BASE / "app/src/main/java/com/v2ray/ang/AppConfig.kt",
-        BASE / "app/src/main/java/com/v2ray/ang/ui/SubEditActivity.kt",
-        BASE / "app/src/main/res/values/strings.xml",
-        BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigContextBuilder.kt",
-        ccm_path,
-    ]
-    for f in files:
-        if f.exists():
-            backup(f)
 
     patch_appconfig()
     patch_subedit()
