@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unified patcher for v2rayNG (final working version).
+Unified patcher for v2rayNG – based on exact CoreConfigManager.kt content.
 - Adds custom outbound injection with prev/next chaining.
 - Enhances SubEditActivity dropdown with None and [Current Server].
 - Adds AppConfig.CURRENT_SERVER constant.
@@ -201,7 +201,7 @@ def patch_strings():
         print("• strings.xml: already present")
 
 # ─────────────────────────────────────────────────────────────────────────
-# 4. CoreConfigManager.kt – inject custom outbounds and chain support (safe)
+# 4. CoreConfigManager.kt – exact matches based on the provided file
 # ─────────────────────────────────────────────────────────────────────────
 def patch_coreconfig():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
@@ -211,13 +211,12 @@ def patch_coreconfig():
     c = read(p)
 
     # ------------------------------------------------------------------
-    # 1. Insert helper functions before the "    // endregion" line
-    #    This is the last line of the file (after data class BalancerStrategy)
+    # 1. Insert helper functions before the line "    //endregion"
     # ------------------------------------------------------------------
     if "private fun injectCustomOutbounds" not in c:
-        marker = "    // endregion"
+        marker = "    //endregion"
         if marker not in c:
-            print("✗ CoreConfigManager: anchor '    // endregion' not found")
+            print("✗ CoreConfigManager: anchor '    //endregion' not found")
             return
 
         helpers_raw = """
@@ -344,24 +343,24 @@ def patch_coreconfig():
 """
         # Insert helpers right before the marker line
         c = c.replace(marker, helpers_raw + "\n\n" + marker)
-        print("✓ CoreConfigManager: added helper functions before '// endregion'")
+        print("✓ CoreConfigManager: added helper functions before '    //endregion'")
     else:
         print("• CoreConfigManager: helpers already present")
 
     # ------------------------------------------------------------------
     # 2. Insert call to injectCustomOutbounds inside buildUnifiedConfig
-    #    Insert right before the comment that starts with "// User routing rules"
+    #    Insert before the line "        // User routing rules ..."
     # ------------------------------------------------------------------
     if "injectCustomOutbounds(v2rayConfig)" not in c:
-        marker = "// User routing rules (policyGroupBalancerTags rewrites TAG_PROXY→balancer when main is POLICYGROUP)."
+        marker = "        // User routing rules (policyGroupBalancerTags rewrites TAG_PROXY→balancer when main is POLICYGROUP)."
         if marker in c:
             c = c.replace(marker, "        // Inject custom outbounds for routing rules\n        injectCustomOutbounds(v2rayConfig)\n\n        " + marker, 1)
             print("✓ CoreConfigManager: added injectCustomOutbounds call before user routing rules")
         else:
             # Fallback: insert before configureRouting call
-            fallback = "configureRouting(configContext, v2rayConfig, policyGroupBalancerTags)"
+            fallback = "        configureRouting(configContext, v2rayConfig, policyGroupBalancerTags)"
             if fallback in c:
-                c = c.replace(fallback, "        injectCustomOutbounds(v2rayConfig)\n\n        " + fallback, 1)
+                c = c.replace(fallback, "        // Inject custom outbounds for routing rules\n        injectCustomOutbounds(v2rayConfig)\n\n        " + fallback, 1)
                 print("✓ CoreConfigManager: added injectCustomOutbounds call before configureRouting (fallback)")
             else:
                 print("⚠ CoreConfigManager: could not find insertion point for injectCustomOutbounds call")
@@ -374,7 +373,7 @@ def patch_coreconfig():
 # ─────────────────────────────────────────────────────────────────────────
 def main():
     print("=" * 70)
-    print("Custom Outbound + Enhanced Profile Selector Patcher (Final)")
+    print("Custom Outbound + Enhanced Profile Selector Patcher (Final Fix)")
     print("=" * 70)
 
     files_to_backup = [
