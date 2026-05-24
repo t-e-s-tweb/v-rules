@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
-Final patcher – fixes SubscriptionItem import and all type references.
+Complete final patcher for v2rayNG – all fixes included.
+- Adds None / [Current Server] to subscription editor.
+- Resolves [Current Server] in proxy chains.
+- Reuses current main server instead of creating duplicate outbounds.
+- Full chain deduplication and custom outbound injection.
 """
 
+import re
 import sys
 import shutil
 from pathlib import Path
@@ -170,7 +175,6 @@ def patch_strings():
     for k, v in needed.items():
         if f'name="{k}"' in c:
             continue
-        import re
         m = re.search(r'(\s*)</resources>', c, re.IGNORECASE)
         if not m:
             print(f"✗ strings.xml: </resources> not found")
@@ -263,7 +267,7 @@ def patch_coreconfigcontextbuilder():
     write(p, c)
 
 # ----------------------------------------------------------------------
-# Patched CoreConfigManager.kt with proper imports and type handling
+# Complete patched CoreConfigManager.kt
 # ----------------------------------------------------------------------
 PATCHED_CORECONFIG_MANAGER = r'''package com.v2ray.ang.core
 
@@ -1119,6 +1123,12 @@ object CoreConfigManager {
         LogUtil.d(AppConfig.TAG, "🔗 Applying chain for '$originalTag' using subscription ${subItem.remarks}")
         LogUtil.d(AppConfig.TAG, "   prevProfile='${subItem.prevProfile}', nextProfile='${subItem.nextProfile}'")
 
+        // Get current main server remarks for comparison
+        val currentMainRemarks = MmkvManager.getSelectServer()?.let { 
+            MmkvManager.decodeServerConfig(it)?.remarks 
+        }
+        LogUtil.d(AppConfig.TAG, "   Current main server remarks: '$currentMainRemarks'")
+
         fun addChainOutbound(
             targetRemark: String?,
             chainType: String,
@@ -1131,6 +1141,22 @@ object CoreConfigManager {
                 return
             }
 
+            LogUtil.d(AppConfig.TAG, "   $chainType resolved to: '$resolvedRemark'")
+            
+            // If the resolved remark is the current main server, just set dialerProxy to "proxy"
+            if (resolvedRemark == currentMainRemarks) {
+                LogUtil.d(AppConfig.TAG, "✅ $chainType target is current main server, setting dialerProxy to '${AppConfig.TAG_PROXY}'")
+                val mainOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == AppConfig.TAG_PROXY }
+                if (mainOutbound != null) {
+                    chainTo(mainOutbound)
+                } else {
+                    outbound.ensureSockopt().dialerProxy = AppConfig.TAG_PROXY
+                    LogUtil.d(AppConfig.TAG, "   Set dialerProxy directly to '${AppConfig.TAG_PROXY}'")
+                }
+                return
+            }
+
+            // Check if already added
             val existingByTag = v2rayConfig.outbounds.firstOrNull { it.tag == desiredTag }
             if (existingByTag != null) {
                 chainTo(existingByTag)
@@ -1155,13 +1181,6 @@ object CoreConfigManager {
                 LogUtil.w(AppConfig.TAG, "❌ No profile found for $chainType remark '$resolvedRemark'")
                 return
             }
-            
-            val mainRemarks = MmkvManager.getSelectServer()?.let { MmkvManager.decodeServerConfig(it)?.remarks }
-            if (chainProfile.remarks == mainRemarks) {
-                outbound.ensureSockopt().dialerProxy = AppConfig.TAG_PROXY
-                LogUtil.d(AppConfig.TAG, "✅ $chainType proxy is main server, set dialerProxy to proxy")
-                return
-            }
 
             val chainOutbound = convertProfile2Outbound(chainProfile)
             if (chainOutbound == null) {
@@ -1174,7 +1193,7 @@ object CoreConfigManager {
             chainTo(chainOutbound)
             v2rayConfig.outbounds.add(chainOutbound)
             existingTags.add(desiredTag)
-            LogUtil.d(AppConfig.TAG, "✅ Created $chainType outbound: $desiredTag")
+            LogUtil.d(AppConfig.TAG, "✅ Created new $chainType outbound: $desiredTag")
         }
 
         addChainOutbound(subItem.prevProfile, "prev", "$originalTag-prev") { prevOutbound ->
@@ -1243,11 +1262,11 @@ def patch_coreconfigmanager():
         return
     backup_kotlin(p)
     write(p, PATCHED_CORECONFIG_MANAGER)
-    print("✓ CoreConfigManager.kt replaced with fully patched version (imports fixed)")
+    print("✓ CoreConfigManager.kt replaced with complete final version")
 
 def main():
     print("=" * 70)
-    print("Final Patcher – with SubscriptionItem import and fixed types")
+    print("Complete Final Patcher – all fixes included")
     print("=" * 70)
 
     try:
@@ -1256,8 +1275,12 @@ def main():
         patch_strings()
         patch_coreconfigcontextbuilder()
         patch_coreconfigmanager()
-        print("\n✅ All patches applied successfully. Rebuild and test.")
-        print("👉 After rebuild, run: adb logcat | grep -E 'com.v2ray.ang|🔗|🎯|❌'")
+        print("\n✅ All patches applied successfully.")
+        print("👉 Rebuild and test. The patcher now:")
+        print("   • Adds None / [Current Server] to subscription dropdown")
+        print("   • Resolves [Current Server] in prev/next profiles")
+        print("   • Reuses current main server instead of creating duplicate outbounds")
+        print("   • Provides full chain deduplication")
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback
