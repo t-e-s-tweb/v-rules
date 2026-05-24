@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Final robust patcher for v2rayNG.
-- Replaces CoreConfigManager.kt with a fully patched version (no syntax errors).
-- Automatically patches other safe files.
-- Idempotent – safe to run multiple times.
+Final patcher for v2rayNG – includes detailed logging for chain proxy debugging.
+- Adds None / [Current Server] to subscription editor.
+- Adds [Current Server] resolution in proxy chains.
+- Replaces CoreConfigManager.kt with logging-enhanced version.
+- Fully automated, no manual steps.
 """
 
 import re
@@ -212,7 +213,6 @@ def patch_coreconfigcontextbuilder():
 
     # Add resolveCurrentServer helper if missing
     if "private fun resolveCurrentServer" not in c:
-        # Insert before the last '}'
         lines = c.splitlines()
         for i in range(len(lines) - 1, -1, -1):
             if lines[i].strip() == '}':
@@ -285,7 +285,7 @@ def patch_coreconfigcontextbuilder():
     write(p, c)
 
 # ----------------------------------------------------------------------
-# 5. CoreConfigManager.kt – replace with fully patched version
+# 5. CoreConfigManager.kt – replace with patched + logging version
 # ----------------------------------------------------------------------
 PATCHED_CORECONFIG_MANAGER = r'''package com.v2ray.ang.core
 
@@ -572,6 +572,7 @@ object CoreConfigManager {
         v2rayConfig: V2rayConfig,
         outboundTagMap: MutableMap<String, String>,
     ) {
+        LogUtil.d(AppConfig.TAG, "🔗 Processing PROXYCHAIN for tag='${resolvedOutbound.tag}', prepend=$prepend")
         val chainOutboundsWithProfiles = resolvedOutbound.resolvedProfiles
             .mapNotNull { profile -> convertProfile2Outbound(profile)?.let { profile to it } }
             .toMutableList()
@@ -588,6 +589,7 @@ object CoreConfigManager {
                 v2rayConfig.outbounds.add(outbound)
             }
             existingTags.add(resolvedOutbound.tag)
+            LogUtil.d(AppConfig.TAG, "✅ Single-hop chain: added outbound '${resolvedOutbound.tag}'")
             return
         }
 
@@ -596,9 +598,13 @@ object CoreConfigManager {
                 resolvedOutbound.tag
             } else {
                 val dedupKey = "chain-${profile.remarks}"
-                outboundTagMap[dedupKey]?.let { return@mapIndexed it }
+                outboundTagMap[dedupKey]?.let {
+                    LogUtil.d(AppConfig.TAG, "♻️ Reusing existing hop for '${profile.remarks}' as tag '$it'")
+                    return@mapIndexed it
+                }
                 val tag = "${AppConfig.TAG_PROXY}-${resolvedOutbound.tag}-$index"
                 outboundTagMap[dedupKey] = tag
+                LogUtil.d(AppConfig.TAG, "🆕 Creating new hop tag '$tag' for '${profile.remarks}'")
                 tag
             }
         }
@@ -607,6 +613,7 @@ object CoreConfigManager {
             val tag = chainTags[index]
             outbound.tag = tag
             if (tag in existingTags) {
+                LogUtil.d(AppConfig.TAG, "⏩ Hop tag '$tag' already exists, skipping addition")
                 return@forEachIndexed
             }
             if (prepend) {
@@ -615,12 +622,19 @@ object CoreConfigManager {
                 v2rayConfig.outbounds.add(outbound)
             }
             existingTags.add(tag)
+            LogUtil.d(AppConfig.TAG, "➕ Added outbound with tag '$tag'")
         }
 
         for (i in 0 until chainTags.size - 1) {
             val currentTag = chainTags[i]
             val nextTag = chainTags[i + 1]
-            v2rayConfig.outbounds.firstOrNull { it.tag == currentTag }?.ensureSockopt()?.dialerProxy = nextTag
+            val currentOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == currentTag }
+            if (currentOutbound != null) {
+                currentOutbound.ensureSockopt().dialerProxy = nextTag
+                LogUtil.d(AppConfig.TAG, "🔗 Set dialerProxy of '$currentTag' → '$nextTag'")
+            } else {
+                LogUtil.e(AppConfig.TAG, "❌ Could not find outbound with tag '$currentTag' to set dialerProxy")
+            }
         }
     }
 
@@ -1399,11 +1413,21 @@ object CoreConfigManager {
             .filter { it.enabled && !AppConfig.BUILTIN_OUTBOUND_TAGS.contains(it.outboundTag) }
             .map { it.outboundTag }
             .distinct()
+        LogUtil.d(AppConfig.TAG, "🎯 Custom outbound tags from routing rules: $customOutboundTags")
 
         for (tag in customOutboundTags) {
-            if (tag in existingTags) continue
-            val profile = SettingsManager.getServerViaRemarks(tag) ?: continue
-            val outbound = convertProfile2Outbound(profile) ?: continue
+            if (tag in existingTags) {
+                LogUtil.d(AppConfig.TAG, "⏩ Custom outbound '$tag' already injected, skipping")
+                continue
+            }
+            val profile = SettingsManager.getServerViaRemarks(tag) ?: run {
+                LogUtil.w(AppConfig.TAG, "⚠️ No profile found for custom outbound tag '$tag'")
+                continue
+            }
+            val outbound = convertProfile2Outbound(profile) ?: run {
+                LogUtil.w(AppConfig.TAG, "⚠️ Failed to convert profile for '$tag' to outbound")
+                continue
+            }
             outbound.tag = tag
 
             applySubscriptionChain(v2rayConfig, profile, outbound, outboundTagMap, existingTags)
@@ -1411,7 +1435,7 @@ object CoreConfigManager {
             v2rayConfig.outbounds.add(outbound)
             existingTags.add(tag)
             outboundTagMap[tag] = tag
-            LogUtil.d(AppConfig.TAG, "Injected custom outbound: $tag")
+            LogUtil.d(AppConfig.TAG, "✅ Injected custom outbound '$tag'")
         }
     }
 
@@ -1424,21 +1448,18 @@ def patch_coreconfigmanager():
     if not p.exists():
         print("✗ CoreConfigManager.kt not found – skipping")
         return
-    # Backup original
     backup_kotlin(p)
-    # Write patched version
     write(p, PATCHED_CORECONFIG_MANAGER)
-    print("✓ CoreConfigManager.kt replaced with fully patched version")
+    print("✓ CoreConfigManager.kt replaced with fully patched + logging version")
 
 # ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
 def main():
     print("=" * 70)
-    print("Final Robust Patcher – replaces CoreConfigManager.kt with a correct version v1")
+    print("Final Patcher with Logging – replaces CoreConfigManager with debug version")
     print("=" * 70)
 
-    # Backup and patch each file
     try:
         patch_appconfig()
         patch_subedit()
@@ -1446,6 +1467,8 @@ def main():
         patch_coreconfigcontextbuilder()
         patch_coreconfigmanager()
         print("\n✅ All patches applied successfully. Rebuild and test.")
+        print("👉 After rebuilding, run: adb logcat | grep -E 'com.v2ray.ang|🔗|🎯'")
+        print("   Look for messages starting with 🔗 or 🎯 to debug chain proxy wiring.")
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback
