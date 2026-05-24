@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """
-Final patcher for v2rayNG – fixes [Current Server] chain handling.
-- Adds detailed logging to debug conversion failures.
-- Ensures chains work even when [Current Server] is used in pre/next.
+Final patcher – fixes SubscriptionItem import and all type references.
 """
 
-import re
 import sys
 import shutil
 from pathlib import Path
@@ -173,6 +170,7 @@ def patch_strings():
     for k, v in needed.items():
         if f'name="{k}"' in c:
             continue
+        import re
         m = re.search(r'(\s*)</resources>', c, re.IGNORECASE)
         if not m:
             print(f"✗ strings.xml: </resources> not found")
@@ -265,7 +263,7 @@ def patch_coreconfigcontextbuilder():
     write(p, c)
 
 # ----------------------------------------------------------------------
-# Patched CoreConfigManager.kt with logging and fixes
+# Patched CoreConfigManager.kt with proper imports and type handling
 # ----------------------------------------------------------------------
 PATCHED_CORECONFIG_MANAGER = r'''package com.v2ray.ang.core
 
@@ -278,6 +276,7 @@ import com.v2ray.ang.dto.CoreConfigContext
 import com.v2ray.ang.dto.V2rayConfig
 import com.v2ray.ang.dto.entities.ProfileItem
 import com.v2ray.ang.dto.entities.RulesetItem
+import com.v2ray.ang.dto.entities.SubscriptionItem
 import com.v2ray.ang.enums.BalancerStrategyType
 import com.v2ray.ang.enums.CoreResolvedType
 import com.v2ray.ang.enums.EConfigType
@@ -1107,13 +1106,10 @@ object CoreConfigManager {
     ) {
         var subItem: SubscriptionItem? = null
         
-        // Try to get subscription from the profile
         if (!profile.subscriptionId.isNullOrEmpty()) {
             subItem = MmkvManager.decodeSubscription(profile.subscriptionId)
         }
         
-        // If profile has no subscription, check if the outbound tag is the current server
-        // and get subscription from there? For now, log and return
         if (subItem == null) {
             LogUtil.d(AppConfig.TAG, "⚠️ No subscription for profile '${profile.remarks}', cannot apply chain")
             return
@@ -1247,11 +1243,11 @@ def patch_coreconfigmanager():
         return
     backup_kotlin(p)
     write(p, PATCHED_CORECONFIG_MANAGER)
-    print("✓ CoreConfigManager.kt replaced with fully patched + logging version")
+    print("✓ CoreConfigManager.kt replaced with fully patched version (imports fixed)")
 
 def main():
     print("=" * 70)
-    print("Final Patcher – fixes [Current Server] chain handling with detailed logging")
+    print("Final Patcher – with SubscriptionItem import and fixed types")
     print("=" * 70)
 
     try:
@@ -1260,9 +1256,8 @@ def main():
         patch_strings()
         patch_coreconfigcontextbuilder()
         patch_coreconfigmanager()
-        print("\n✅ All patches applied successfully.")
-        print("👉 Rebuild and run: adb logcat | grep -E 'com.v2ray.ang|🔗|🎯|❌'")
-        print("   This will show which profile fails to convert in the chain.")
+        print("\n✅ All patches applied successfully. Rebuild and test.")
+        print("👉 After rebuild, run: adb logcat | grep -E 'com.v2ray.ang|🔗|🎯|❌'")
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback
