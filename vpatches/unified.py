@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-Final patcher – next hop uses numeric suffix (-1) instead of -next.
+Final patcher – works with latest upstream CoreConfigManager.kt
+- Adds CURRENT_SERVER constant.
+- Enhances subscription editor dropdown.
+- Resolves [Current Server] in proxy chains.
+- Replaces CoreConfigManager with full custom outbound + chain support.
 """
 
 import re
@@ -21,20 +25,48 @@ def backup_kotlin(p: Path):
 def read(p): return p.read_text(encoding="utf-8")
 def write(p, s): p.write_text(s, encoding="utf-8")
 
+# ----------------------------------------------------------------------
+# 1. AppConfig.kt – add CURRENT_SERVER constant
+# ----------------------------------------------------------------------
 def patch_appconfig():
     p = BASE / "app/src/main/java/com/v2ray/ang/AppConfig.kt"
     c = read(p)
     if '"__CURRENT_SERVER__"' in c:
         print("• AppConfig: CURRENT_SERVER already present")
         return
-    old = '    const val TAG_BLOCKED = "block"'
-    new = '    const val TAG_BLOCKED = "block"\n    const val CURRENT_SERVER = "__CURRENT_SERVER__"'
-    if old in c:
-        write(p, c.replace(old, new, 1))
+    # Find BUILTIN_OUTBOUND_TAGS and add after it, or fallback to end of file
+    marker = "    val BUILTIN_OUTBOUND_TAGS = setOf("
+    if marker in c:
+        # Insert after the setOf block? Actually just add at the end of the file is simpler.
+        # We'll insert after the BUILTIN_OUTBOUND_TAGS definition.
+        insert_pos = c.find(marker) + len(marker)
+        # Find the closing brace of the set
+        brace_count = 1
+        i = insert_pos
+        while i < len(c) and brace_count > 0:
+            if c[i] == '(':
+                brace_count += 1
+            elif c[i] == ')':
+                brace_count -= 1
+            i += 1
+        insert_at = i
+        const_line = "\n    const val CURRENT_SERVER = \"__CURRENT_SERVER__\""
+        c = c[:insert_at] + const_line + c[insert_at:]
+        write(p, c)
         print("✓ AppConfig: added CURRENT_SERVER")
     else:
-        print("✗ AppConfig: insertion point not found")
+        # Fallback: add at end of file before the last '}'
+        last_brace = c.rfind('}')
+        if last_brace != -1:
+            c = c[:last_brace] + "\n    const val CURRENT_SERVER = \"__CURRENT_SERVER__\"\n" + c[last_brace:]
+            write(p, c)
+            print("✓ AppConfig: added CURRENT_SERVER (fallback)")
+        else:
+            print("✗ AppConfig: could not add CURRENT_SERVER")
 
+# ----------------------------------------------------------------------
+# 2. SubEditActivity.kt – enhance dropdown (if not already)
+# ----------------------------------------------------------------------
 def patch_subedit():
     p = BASE / "app/src/main/java/com/v2ray/ang/ui/SubEditActivity.kt"
     if not p.exists():
@@ -42,7 +74,8 @@ def patch_subedit():
         return
     c = read(p)
 
-    old1 = '''    private fun setupProfileRemarkInputs() {
+    # Only patch if the expected structures exist; otherwise skip.
+    old_setup_inputs = '''    private fun setupProfileRemarkInputs() {
         val suggestions = SettingsManager.getProfileRemarks(
             excludeConfigTypes = setOf(
                 EConfigType.CUSTOM,
@@ -54,7 +87,7 @@ def patch_subedit():
         setupProfileRemarkInput(binding.etPreProfile, binding.btnPreProfileDropdown, suggestions)
         setupProfileRemarkInput(binding.etNextProfile, binding.btnNextProfileDropdown, suggestions)
     }'''
-    new1 = '''    private fun setupProfileRemarkInputs() {
+    new_setup_inputs = '''    private fun setupProfileRemarkInputs() {
         val baseSuggestions = SettingsManager.getProfileRemarks(
             excludeConfigTypes = setOf(
                 EConfigType.CUSTOM,
@@ -66,13 +99,13 @@ def patch_subedit():
         setupProfileRemarkInput(binding.etPreProfile, binding.btnPreProfileDropdown, suggestions)
         setupProfileRemarkInput(binding.etNextProfile, binding.btnNextProfileDropdown, suggestions)
     }'''
-    if old1 in c:
-        c = c.replace(old1, new1, 1)
+    if old_setup_inputs in c:
+        c = c.replace(old_setup_inputs, new_setup_inputs, 1)
         print("✓ SubEditActivity: updated setupProfileRemarkInputs")
     else:
-        print("⚠ SubEditActivity: setupProfileRemarkInputs not found")
+        print("⚠ SubEditActivity: setupProfileRemarkInputs not found (maybe already patched)")
 
-    old2 = '''    private fun setupProfileRemarkInput(
+    old_setup_input = '''    private fun setupProfileRemarkInput(
         input: AutoCompleteTextView,
         dropdownButton: ImageButton,
         suggestions: List<String>
@@ -89,7 +122,7 @@ def patch_subedit():
             input.showDropDown()
         }
     }'''
-    new2 = '''    private fun setupProfileRemarkInput(
+    new_setup_input = '''    private fun setupProfileRemarkInput(
         input: AutoCompleteTextView,
         dropdownButton: ImageButton,
         suggestions: List<String>
@@ -116,15 +149,15 @@ def patch_subedit():
             input.setText(stored)
         }
     }'''
-    if old2 in c:
-        c = c.replace(old2, new2, 1)
+    if old_setup_input in c:
+        c = c.replace(old_setup_input, new_setup_input, 1)
         print("✓ SubEditActivity: updated setupProfileRemarkInput")
     else:
         print("⚠ SubEditActivity: setupProfileRemarkInput not found")
 
-    old3 = '''        binding.etPreProfile.text = Utils.getEditable(subItem.prevProfile)
+    old_binding = '''        binding.etPreProfile.text = Utils.getEditable(subItem.prevProfile)
         binding.etNextProfile.text = Utils.getEditable(subItem.nextProfile)'''
-    new3 = '''        val preDisplay = when (subItem.prevProfile) {
+    new_binding = '''        val preDisplay = when (subItem.prevProfile) {
             "" -> "None"
             AppConfig.CURRENT_SERVER -> "[Current Server]"
             else -> subItem.prevProfile
@@ -136,15 +169,15 @@ def patch_subedit():
             else -> subItem.nextProfile
         }
         binding.etNextProfile.setText(nextDisplay)'''
-    if old3 in c:
-        c = c.replace(old3, new3, 1)
+    if old_binding in c:
+        c = c.replace(old_binding, new_binding, 1)
         print("✓ SubEditActivity: updated bindingServer")
     else:
         print("⚠ SubEditActivity: bindingServer lines not found")
 
-    old4 = '''        subItem.prevProfile = binding.etPreProfile.text.toString()
+    old_save = '''        subItem.prevProfile = binding.etPreProfile.text.toString()
         subItem.nextProfile = binding.etNextProfile.text.toString()'''
-    new4 = '''        subItem.prevProfile = when (binding.etPreProfile.text.toString()) {
+    new_save = '''        subItem.prevProfile = when (binding.etPreProfile.text.toString()) {
             "None" -> ""
             "[Current Server]" -> AppConfig.CURRENT_SERVER
             else -> binding.etPreProfile.text.toString()
@@ -154,8 +187,8 @@ def patch_subedit():
             "[Current Server]" -> AppConfig.CURRENT_SERVER
             else -> binding.etNextProfile.text.toString()
         }'''
-    if old4 in c:
-        c = c.replace(old4, new4, 1)
+    if old_save in c:
+        c = c.replace(old_save, new_save, 1)
         print("✓ SubEditActivity: updated saveServer")
     else:
         print("⚠ SubEditActivity: saveServer lines not found")
@@ -163,6 +196,9 @@ def patch_subedit():
     write(p, c)
     print("✓ SubEditActivity: all enhancements applied")
 
+# ----------------------------------------------------------------------
+# 3. strings.xml – add None / [Current Server]
+# ----------------------------------------------------------------------
 def patch_strings():
     p = BASE / "app/src/main/res/values/strings.xml"
     c = read(p)
@@ -184,6 +220,9 @@ def patch_strings():
     else:
         print("• strings.xml: already present")
 
+# ----------------------------------------------------------------------
+# 4. CoreConfigContextBuilder.kt – add resolveCurrentServer
+# ----------------------------------------------------------------------
 def patch_coreconfigcontextbuilder():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigContextBuilder.kt"
     if not p.exists():
@@ -192,6 +231,7 @@ def patch_coreconfigcontextbuilder():
     c = read(p)
 
     if "private fun resolveCurrentServer" not in c:
+        # Insert before the last '}'
         lines = c.splitlines()
         for i in range(len(lines) - 1, -1, -1):
             if lines[i].strip() == '}':
@@ -263,7 +303,7 @@ def patch_coreconfigcontextbuilder():
     write(p, c)
 
 # ----------------------------------------------------------------------
-# Patched CoreConfigManager.kt – next hop uses numeric suffix (-1)
+# 5. CoreConfigManager.kt – complete replacement with all fixes
 # ----------------------------------------------------------------------
 PATCHED_CORECONFIG_MANAGER = r'''package com.v2ray.ang.core
 
@@ -295,6 +335,9 @@ object CoreConfigManager {
 
     //region get config function
 
+    /**
+     * Build the runtime configuration for normal startup.
+     */
     fun getV2rayConfig(context: Context, guid: String): ConfigResult {
         try {
             val configContext = CoreConfigContextBuilder.build(context, guid)
@@ -313,6 +356,11 @@ object CoreConfigManager {
         }
     }
 
+    /**
+     * Build a lightweight configuration for latency testing.
+     *
+     * The core flow is reused, then non-essential sections are removed.
+     */
     fun getV2rayConfig4Speedtest(context: Context, guid: String): ConfigResult {
         try {
             val configContext = CoreConfigContextBuilder.build(context, guid)
@@ -322,6 +370,7 @@ object CoreConfigManager {
             }
             val v2rayConfig = buildUnifiedConfig(configContext)
             postProcessForSpeedtest(v2rayConfig)
+
             return toConfigResult(configContext, v2rayConfig)
         } catch (e: Exception) {
             LogUtil.e(AppConfig.TAG, "Failed to get V2ray config for speedtest", e)
@@ -333,6 +382,9 @@ object CoreConfigManager {
         }
     }
 
+    /**
+     * Build configuration for custom profiles.
+     */
     private fun buildV2rayCustomConfig(configContext: CoreConfigContext): ConfigResult {
         val context = configContext.context
         val raw = MmkvManager.decodeServerRaw(configContext.guid)
@@ -344,6 +396,7 @@ object CoreConfigManager {
 
         val json = JsonUtil.parseString(raw)?.takeIf { it.isJsonObject }?.asJsonObject ?: return result
 
+        // Check whether package names need to be replaced with UIDs
         if (SettingsManager.canUseProcessRouting()) {
             val rulesJson = json.get("routing")?.takeIf { it.isJsonObject }?.asJsonObject
                 ?.get("rules")?.takeIf { it.isJsonArray }?.asJsonArray
@@ -356,10 +409,12 @@ object CoreConfigManager {
                     it.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString
                 }.takeIf { it.isNotEmpty() } ?: continue
                 val uids = PackageUidResolver.packageNamesToUids(context, packages).takeIf { it.isNotEmpty() } ?: continue
+
                 rule.add("process", JsonArray().apply { uids.forEach { add(it) } })
             }
         }
 
+        // check if tun inbound exists
         val inboundsJson = json.get("inbounds")?.takeIf { it.isJsonArray }?.asJsonArray
             ?: JsonArray().also { json.add("inbounds", it) }
         val tunNotExists = inboundsJson.none { elem ->
@@ -369,6 +424,7 @@ object CoreConfigManager {
         }
 
         if (tunNotExists) {
+            // add tun inbound from template
             val templateConfig = initV2rayConfig(configContext)
             templateConfig.inbounds.firstOrNull { it.tag == "tun" }?.let { inboundTun ->
                 inboundTun.settings?.mtu = SettingsManager.getVpnMtu()
@@ -379,6 +435,12 @@ object CoreConfigManager {
         return JsonUtil.toJsonPretty(json)?.let { ConfigResult(true, configContext.guid, it) } ?: result
     }
 
+    /**
+     * Build one unified configuration for every non-custom profile type.
+     *
+     * The analyzed outbound plan is consumed in order and converted to concrete
+     * outbounds before routing, DNS, and runtime extras are assembled.
+     */
     private fun buildUnifiedConfig(configContext: CoreConfigContext): V2rayConfig {
         require(configContext.resolvedOutbounds.isNotEmpty()) { "resolvedOutbounds must not be empty for a non-CUSTOM context" }
         val primaryResolvedOutbound = configContext.resolvedOutbounds.first()
@@ -397,6 +459,8 @@ object CoreConfigManager {
         val policyGroupBalancerTags = mutableMapOf<String, String>()
         val balancerStrategies = mutableListOf<BalancerStrategy>()
 
+        // resolvedOutbounds is a single ordered plan: index 0 is primary and must be prepended,
+        // the rest are routing outbounds and can be appended.
         configContext.resolvedOutbounds.forEachIndexed { index, spec ->
             buildOutbounds(
                 resolvedOutbound = spec,
@@ -409,13 +473,17 @@ object CoreConfigManager {
             )
         }
 
+        // Inject custom outbounds for routing rules
         injectCustomOutbounds(v2rayConfig)
 
+        // User routing rules (policyGroupBalancerTags rewrites TAG_PROXY→balancer when main is POLICYGROUP).
         configureRouting(configContext, v2rayConfig, policyGroupBalancerTags)
         configureFakeDns(v2rayConfig)
         configureDns(v2rayConfig, policyGroupBalancerTags)
         configureLocalDns(v2rayConfig)
 
+        // (added by getDns / getCustomLocalDns) to use the balancer, then add
+        // the catch-all balancer rule.
         if (primaryResolvedOutbound.resolvedType == CoreResolvedType.POLICYGROUP) {
             if (v2rayConfig.routing.domainStrategy == "IPIfNonMatch") {
                 v2rayConfig.routing.rules.add(
@@ -441,6 +509,10 @@ object CoreConfigManager {
         return v2rayConfig
     }
 
+    /**
+     * Convert one analyzed outbound entry into concrete outbounds and register
+     * them to the runtime configuration.
+     */
     private fun buildOutbounds(
         resolvedOutbound: CoreConfigContext.ResolvedOutbound,
         prepend: Boolean,
@@ -462,6 +534,7 @@ object CoreConfigManager {
                 existingTags = existingTags,
                 v2rayConfig = v2rayConfig,
             )
+
             CoreResolvedType.PROXYCHAIN -> handleProxyChainResolvedOutbound(
                 resolvedOutbound = resolvedOutbound,
                 prepend = prepend,
@@ -469,6 +542,7 @@ object CoreConfigManager {
                 v2rayConfig = v2rayConfig,
                 outboundTagMap = outboundTagMap,
             )
+
             CoreResolvedType.POLICYGROUP -> handlePolicyGroupResolvedOutbound(
                 resolvedOutbound = resolvedOutbound,
                 prepend = prepend,
@@ -480,6 +554,9 @@ object CoreConfigManager {
         }
     }
 
+    /**
+     * Build and insert a single-node outbound entry.
+     */
     private fun handleNormalResolvedOutbound(
         resolvedOutbound: CoreConfigContext.ResolvedOutbound,
         prepend: Boolean,
@@ -503,13 +580,9 @@ object CoreConfigManager {
         existingTags.add(resolvedOutbound.tag)
     }
 
-    private fun getCurrentMainServerRemarks(): String? {
-        val currId = MmkvManager.getSelectServer()
-        return if (!currId.isNullOrEmpty()) {
-            MmkvManager.decodeServerConfig(currId)?.remarks?.trim()
-        } else null
-    }
-
+    /**
+     * Build and insert a multi-hop chain entry with deduplication and main server reuse.
+     */
     private fun handleProxyChainResolvedOutbound(
         resolvedOutbound: CoreConfigContext.ResolvedOutbound,
         prepend: Boolean,
@@ -519,23 +592,24 @@ object CoreConfigManager {
     ) {
         LogUtil.d(AppConfig.TAG, "🔗 Processing PROXYCHAIN for tag='${resolvedOutbound.tag}', prepend=$prepend")
         LogUtil.d(AppConfig.TAG, "   Number of resolvedProfiles: ${resolvedOutbound.resolvedProfiles.size}")
-        
+
         val mainRemarks = getCurrentMainServerRemarks()
         LogUtil.d(AppConfig.TAG, "   Current main server remarks: '$mainRemarks'")
-        
+
         var prevOutboundTag: String? = null
-        
+
         for ((profileIndex, profile) in resolvedOutbound.resolvedProfiles.withIndex()) {
             val profileRemarks = profile.remarks.trim()
             val isMainServer = mainRemarks != null && profileRemarks.equals(mainRemarks, ignoreCase = true)
-            
+
             val desiredTag = if (profileIndex == 0) {
                 resolvedOutbound.tag
             } else {
                 "${AppConfig.TAG_PROXY}-${resolvedOutbound.tag}-${profileIndex}"
             }
-            
+
             if (isMainServer && profileIndex == 0) {
+                // First hop is main server – treat as single-hop, set dialerProxy directly to "proxy"
                 LogUtil.d(AppConfig.TAG, "♻️ Hop 0 is current main server ('$profileRemarks') – setting ${resolvedOutbound.tag}.dialerProxy = 'proxy'")
                 val customOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == resolvedOutbound.tag }
                 if (customOutbound != null) {
@@ -543,8 +617,9 @@ object CoreConfigManager {
                 }
                 return
             }
-            
+
             if (isMainServer && profileIndex > 0) {
+                // Non-first hop is main server – skip creating new outbound, wire previous to "proxy"
                 LogUtil.d(AppConfig.TAG, "♻️ Hop $profileIndex is current main server ('$profileRemarks') – chaining previous to 'proxy'")
                 if (prevOutboundTag != null) {
                     val prevOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == prevOutboundTag }
@@ -555,14 +630,14 @@ object CoreConfigManager {
                 }
                 continue
             }
-            
+
             val outbound = convertProfile2Outbound(profile)
             if (outbound == null) {
                 LogUtil.e(AppConfig.TAG, "❌ Failed to convert profile '${profile.remarks}' (type=${profile.configType})")
                 continue
             }
             outbound.tag = desiredTag
-            
+
             val mapKey = "chain-${profile.remarks}"
             val existingTag = outboundTagMap[mapKey]
             if (existingTag != null) {
@@ -577,7 +652,7 @@ object CoreConfigManager {
                     continue
                 }
             }
-            
+
             if (prepend) {
                 v2rayConfig.outbounds.add(0, outbound)
             } else {
@@ -585,7 +660,7 @@ object CoreConfigManager {
             }
             existingTags.add(desiredTag)
             outboundTagMap[mapKey] = desiredTag
-            
+
             if (prevOutboundTag != null) {
                 val prevOut = v2rayConfig.outbounds.firstOrNull { it.tag == prevOutboundTag }
                 prevOut?.ensureSockopt()?.dialerProxy = desiredTag
@@ -593,7 +668,8 @@ object CoreConfigManager {
             }
             prevOutboundTag = desiredTag
         }
-        
+
+        // If we never set any dialerProxy (all hops were main server after first?), fallback
         if (prevOutboundTag == null) {
             val customOutboundTag = resolvedOutbound.tag
             val customOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == customOutboundTag }
@@ -604,6 +680,9 @@ object CoreConfigManager {
         }
     }
 
+    /**
+     * Build and insert a policy-group entry and its balancer metadata.
+     */
     private fun handlePolicyGroupResolvedOutbound(
         resolvedOutbound: CoreConfigContext.ResolvedOutbound,
         prepend: Boolean,
@@ -665,6 +744,9 @@ object CoreConfigManager {
         policyGroupBalancerTags[resolvedOutbound.tag] = balancerTag
     }
 
+    /**
+     * Trim runtime sections that are not needed for latency testing.
+     */
     private fun postProcessForSpeedtest(v2rayConfig: V2rayConfig) {
         v2rayConfig.log.loglevel = MmkvManager.decodeSettingsString(AppConfig.PREF_LOGLEVEL) ?: "warning"
         v2rayConfig.inbounds.clear()
@@ -676,6 +758,9 @@ object CoreConfigManager {
         v2rayConfig.outbounds.forEach { key -> key.mux = null }
     }
 
+    /**
+     * Serialize a runtime configuration into a standard result object.
+     */
     private fun toConfigResult(configContext: CoreConfigContext, v2rayConfig: V2rayConfig): ConfigResult {
         return ConfigResult(
             status = true,
@@ -684,6 +769,9 @@ object CoreConfigManager {
         )
     }
 
+    /**
+     * Load the base template from cache or assets and parse it.
+     */
     private fun initV2rayConfig(configContext: CoreConfigContext): V2rayConfig {
         val context = configContext.context
         val assets: String
@@ -704,7 +792,9 @@ object CoreConfigManager {
             ?: error("Failed to parse config template")
     }
 
+
     //endregion
+
 
     //region some sub function
 
@@ -712,11 +802,16 @@ object CoreConfigManager {
         return SettingsManager.isVpnMode() && !SettingsManager.isUsingHevTun()
     }
 
+    /**
+     * Configure inbound listeners and related runtime options.
+     */
     private fun configureInbounds(v2rayConfig: V2rayConfig) {
         val vpn = SettingsManager.isVpnMode()
         val useHev = SettingsManager.isUsingHevTun()
         val forcedByHev = vpn && useHev
+
         val enableLocalProxy = forcedByHev || MmkvManager.decodeSettingsBool(AppConfig.PREF_ENABLE_LOCAL_PROXY, true)
+
         val socksPort = SettingsManager.getSocksPort()
         val socksUsername = SettingsManager.getSocksUsername()
         val socksPassword = SettingsManager.getSocksPassword()
@@ -724,6 +819,7 @@ object CoreConfigManager {
         if (inbound1.settings == null) {
             inbound1.settings = V2rayConfig.InboundBean.InSettingsBean()
         }
+
         if (MmkvManager.decodeSettingsBool(AppConfig.PREF_PROXY_SHARING) != true) {
             inbound1.listen = AppConfig.LOOPBACK
         }
@@ -742,15 +838,18 @@ object CoreConfigManager {
             inbound1.settings?.accounts = null
         }
         val fakedns = MmkvManager.decodeSettingsBool(AppConfig.PREF_FAKE_DNS_ENABLED) == true
-        val sniffAllTlsAndHttp = MmkvManager.decodeSettingsBool(AppConfig.PREF_SNIFFING_ENABLED, true) != false
+        val sniffAllTlsAndHttp =
+            MmkvManager.decodeSettingsBool(AppConfig.PREF_SNIFFING_ENABLED, true) != false
         inbound1.sniffing?.enabled = fakedns || sniffAllTlsAndHttp
-        inbound1.sniffing?.routeOnly = MmkvManager.decodeSettingsBool(AppConfig.PREF_ROUTE_ONLY_ENABLED, false)
+        inbound1.sniffing?.routeOnly =
+            MmkvManager.decodeSettingsBool(AppConfig.PREF_ROUTE_ONLY_ENABLED, false)
         if (!sniffAllTlsAndHttp) {
             inbound1.sniffing?.destOverride?.clear()
         }
         if (fakedns) {
             inbound1.sniffing?.destOverride?.add("fakedns")
         }
+
         if (!Utils.isXray()) {
             val inbound2 = JsonUtil.fromJson(JsonUtil.toJson(inbound1), V2rayConfig.InboundBean::class.java)
                 ?: error("Failed to clone inbound template")
@@ -761,9 +860,11 @@ object CoreConfigManager {
             inbound2.settings?.udp = null
             v2rayConfig.inbounds.add(inbound2)
         }
+
         if (!enableLocalProxy) {
             v2rayConfig.inbounds.removeIf { it.protocol == "socks" || it.protocol == "http" }
         }
+
         if (needTun()) {
             val inboundTun = v2rayConfig.inbounds.firstOrNull { e -> e.tag == "tun" }
             inboundTun?.settings?.mtu = SettingsManager.getVpnMtu()
@@ -771,6 +872,9 @@ object CoreConfigManager {
         }
     }
 
+    /**
+     * Enable fake DNS when local DNS and fake DNS are both enabled.
+     */
     private fun configureFakeDns(v2rayConfig: V2rayConfig) {
         if (MmkvManager.decodeSettingsBool(AppConfig.PREF_LOCAL_DNS_ENABLED) == true
             && MmkvManager.decodeSettingsBool(AppConfig.PREF_FAKE_DNS_ENABLED) == true
@@ -779,42 +883,70 @@ object CoreConfigManager {
         }
     }
 
+    /**
+     * Collect domain rules that target one outbound tag.
+     */
     private fun collectUserRuleDomainsByTag(tag: String): ArrayList<String> {
         val domain = ArrayList<String>()
+
         val rulesetItems = MmkvManager.decodeRoutingRulesets()
         rulesetItems?.forEach { key ->
             if (key.enabled && key.outboundTag == tag && !key.domain.isNullOrEmpty()) {
-                key.domain?.forEach { domain.add(it) }
+                key.domain?.forEach {
+                    domain.add(it)
+                }
             }
         }
+
         return domain
     }
 
+    /**
+     * Collect domain rules that target non-builtin outbound tags.
+     */
     private fun collectCustomOutboundDomains(): ArrayList<String> {
         val domain = ArrayList<String>()
+
         val rulesetItems = MmkvManager.decodeRoutingRulesets()
         rulesetItems?.forEach { key ->
-            if (key.enabled && !AppConfig.BUILTIN_OUTBOUND_TAGS.contains(key.outboundTag) && !key.domain.isNullOrEmpty()) {
-                key.domain?.forEach { domain.add(it) }
+            if (key.enabled && !AppConfig.BUILTIN_OUTBOUND_TAGS.contains(key.outboundTag)
+                && !key.domain.isNullOrEmpty()
+            ) {
+                key.domain?.forEach {
+                    domain.add(it)
+                }
             }
         }
+
         return domain
     }
 
+    /**
+     * Configure local DNS inbounds, outbounds, and routing rules.
+     */
     private fun configureLocalDns(v2rayConfig: V2rayConfig) {
-        if (MmkvManager.decodeSettingsBool(AppConfig.PREF_LOCAL_DNS_ENABLED) != true) return
+        if (MmkvManager.decodeSettingsBool(AppConfig.PREF_LOCAL_DNS_ENABLED) != true) {
+            return
+        }
+
         if (MmkvManager.decodeSettingsBool(AppConfig.PREF_FAKE_DNS_ENABLED) == true) {
             val geositeCn = arrayListOf(AppConfig.GEOSITE_CN)
             val proxyDomain = collectUserRuleDomainsByTag(AppConfig.TAG_PROXY)
             val directDomain = collectUserRuleDomainsByTag(AppConfig.TAG_DIRECT)
             val finalDomain = geositeCn.plus(proxyDomain).plus(directDomain).distinct()
+            // fakedns with all domains to make it always top priority
             v2rayConfig.dns?.servers?.add(
                 0,
-                V2rayConfig.DnsBean.ServersBean(address = "fakedns", domains = finalDomain)
+                V2rayConfig.DnsBean.ServersBean(
+                    address = "fakedns",
+                    domains = finalDomain
+                )
             )
         }
+
         if (SettingsManager.isVpnMode()) {
             if (SettingsManager.isUsingHevTun()) {
+                //hev-socks5-tunnel dns routing
                 v2rayConfig.routing.rules.add(
                     0, V2rayConfig.RoutingBean.RulesBean(
                         inboundTag = arrayListOf("socks"),
@@ -832,6 +964,8 @@ object CoreConfigManager {
                 )
             }
         }
+
+        // DNS outbound
         if (v2rayConfig.outbounds.none { e -> e.protocol == "dns" && e.tag == "dns-out" }) {
             v2rayConfig.outbounds.add(
                 V2rayConfig.OutboundBean(
@@ -845,6 +979,9 @@ object CoreConfigManager {
         }
     }
 
+    /**
+     * Remove speed-test runtime sections when the feature is disabled.
+     */
     private fun applySpeedDisabled(v2rayConfig: V2rayConfig) {
         if (MmkvManager.decodeSettingsBool(AppConfig.PREF_SPEED_ENABLED) != true) {
             v2rayConfig.stats = null
@@ -852,26 +989,53 @@ object CoreConfigManager {
         }
     }
 
-    private fun configureDns(v2rayConfig: V2rayConfig, policyGroupBalancerTags: Map<String, String>) {
+    /**
+     * Configure DNS servers, hosts, and DNS routing rules.
+     */
+    private fun configureDns(
+        v2rayConfig: V2rayConfig,
+        policyGroupBalancerTags: Map<String, String>,
+    ) {
         val hosts = mutableMapOf<String, Any>()
         val servers = ArrayList<Any>()
+
+        //remote Dns
         val remoteDns = SettingsManager.getRemoteDnsServers()
         val proxyDomain = (collectUserRuleDomainsByTag(AppConfig.TAG_PROXY) + collectCustomOutboundDomains()).distinct()
-        remoteDns.forEach { servers.add(it) }
-        if (proxyDomain.isNotEmpty()) {
-            servers.add(V2rayConfig.DnsBean.ServersBean(address = remoteDns.first(), domains = proxyDomain))
+        remoteDns.forEach {
+            servers.add(it)
         }
+        if (proxyDomain.isNotEmpty()) {
+            servers.add(
+                V2rayConfig.DnsBean.ServersBean(
+                    address = remoteDns.first(),
+                    domains = proxyDomain,
+                )
+            )
+        }
+
+        // domestic DNS
         val domesticDns = SettingsManager.getDomesticDnsServers()
         val directDomain = collectUserRuleDomainsByTag(AppConfig.TAG_DIRECT)
         val isCnRoutingMode = directDomain.contains(AppConfig.GEOSITE_CN)
         val cnRegionFilter = { domain: String ->
-            domain.startsWith("geosite:") && (domain.endsWith("-cn") || domain.endsWith("@cn")) || domain == AppConfig.GEOSITE_CN
+            domain.startsWith("geosite:") && (domain.endsWith("-cn") || domain.endsWith("@cn"))
+                    || domain == AppConfig.GEOSITE_CN
         }
-        val finalDirectDomain = if (isCnRoutingMode) directDomain.filterNot { cnRegionFilter(it) } else directDomain
+        val finalDirectDomain = if (isCnRoutingMode) directDomain.filterNot {
+            cnRegionFilter(it)
+        } else directDomain
         val domesticDnsTags = mutableListOf<String>()
         domesticDns.forEachIndexed { index, element ->
             val tag = AppConfig.TAG_DOMESTIC_DNS + index
-            servers.add(V2rayConfig.DnsBean.ServersBean(address = element, domains = finalDirectDomain, skipFallback = true, tag = tag))
+            servers.add(
+                V2rayConfig.DnsBean.ServersBean(
+                    address = element,
+                    domains = finalDirectDomain,
+                    skipFallback = true,
+                    tag = tag
+                )
+            )
             domesticDnsTags.add(tag)
         }
         if (isCnRoutingMode) {
@@ -879,23 +1043,45 @@ object CoreConfigManager {
             val cnRegionDomain = directDomain.filter { cnRegionFilter(it) }
             domesticDns.forEachIndexed { index, element ->
                 val geositeCnDnsTag = AppConfig.TAG_DOMESTIC_DNS + index + "_cn_expect"
-                servers.add(V2rayConfig.DnsBean.ServersBean(address = element, domains = cnRegionDomain, expectIPs = geoipCn, skipFallback = true, tag = geositeCnDnsTag))
+                servers.add(
+                    V2rayConfig.DnsBean.ServersBean(
+                        address = element,
+                        domains = cnRegionDomain,
+                        expectIPs = geoipCn,
+                        skipFallback = true,
+                        tag = geositeCnDnsTag
+                    )
+                )
                 domesticDnsTags.add(geositeCnDnsTag)
             }
         }
+
+        //block dns
         val blkDomain = collectUserRuleDomainsByTag(AppConfig.TAG_BLOCKED)
         if (blkDomain.isNotEmpty()) {
             hosts.putAll(blkDomain.map { it to AppConfig.LOOPBACK })
         }
+
+        // hardcode googleapi rule to fix play store problems
         hosts[AppConfig.GOOGLEAPIS_CN_DOMAIN] = AppConfig.GOOGLEAPIS_COM_DOMAIN
+
+        // hardcode popular Android Private DNS rule to fix localhost DNS problem
         hosts[AppConfig.DNS_ALIDNS_DOMAIN] = AppConfig.DNS_ALIDNS_ADDRESSES
+        hosts[AppConfig.DNS_CISCO_SSE_DOMAIN] = AppConfig.DNS_CISCO_SSE_ADDRESSES
+        hosts[AppConfig.DNS_CISCO_UMBRELLA_DOMAIN] = AppConfig.DNS_CISCO_UMBRELLA_ADDRESSES
         hosts[AppConfig.DNS_CLOUDFLARE_ONE_DOMAIN] = AppConfig.DNS_CLOUDFLARE_ONE_ADDRESSES
+        hosts[AppConfig.DNS_CLOUDFLARE_ONEDOT_DNS_DOMAIN] = AppConfig.DNS_CLOUDFLARE_ONEDOT_DNS_ADDRESSES
         hosts[AppConfig.DNS_CLOUDFLARE_DNS_COM_DOMAIN] = AppConfig.DNS_CLOUDFLARE_DNS_COM_ADDRESSES
         hosts[AppConfig.DNS_CLOUDFLARE_DNS_DOMAIN] = AppConfig.DNS_CLOUDFLARE_DNS_ADDRESSES
-        hosts[AppConfig.DNS_DNSPOD_DOMAIN] = AppConfig.DNS_DNSPOD_ADDRESSES
+        hosts[AppConfig.DNS_CLOUDFLARE_WARP_DOMAIN] = AppConfig.DNS_CLOUDFLARE_WARP_ADDRESSES
+        hosts[AppConfig.DNS_DNSPOD_DOH_DOMAIN] = AppConfig.DNS_DNSPOD_DOH_ADDRESSES
+        hosts[AppConfig.DNS_DNSPOD_DOT_DOMAIN] = AppConfig.DNS_DNSPOD_DOT_ADDRESSES
         hosts[AppConfig.DNS_GOOGLE_DOMAIN] = AppConfig.DNS_GOOGLE_ADDRESSES
         hosts[AppConfig.DNS_QUAD9_DOMAIN] = AppConfig.DNS_QUAD9_ADDRESSES
+        hosts[AppConfig.DNS_SB_DOMAIN] = AppConfig.DNS_SB_ADDRESSES
         hosts[AppConfig.DNS_YANDEX_DOMAIN] = AppConfig.DNS_YANDEX_ADDRESSES
+
+        //User DNS hosts
         val userHosts = MmkvManager.decodeSettingsString(AppConfig.PREF_DNS_HOSTS)
         if (userHosts.isNotNullEmpty()) {
             val userHostsMap = userHosts?.split(",")
@@ -906,12 +1092,16 @@ object CoreConfigManager {
                 hosts.putAll(userHostsMap)
             }
         }
+
+        // DNS dns
         v2rayConfig.dns = V2rayConfig.DnsBean(
             servers = servers,
             hosts = hosts,
             tag = AppConfig.TAG_DNS,
             enableParallelQuery = if ((domesticDns.size + remoteDns.size) > 2) true else null
         )
+
+        // DNS routing
         v2rayConfig.routing.rules.add(
             V2rayConfig.RoutingBean.RulesBean(
                 outboundTag = AppConfig.TAG_DIRECT,
@@ -939,47 +1129,82 @@ object CoreConfigManager {
         }
     }
 
+
     //endregion
+
 
     //region outbound related functions
 
+
+    /**
+     * Resolve outbound domains to IPs and write resolved hosts to DNS map.
+     */
     private fun resolveOutboundDomainsToHosts(v2rayConfig: V2rayConfig) {
-        if (MmkvManager.decodeSettingsString(AppConfig.PREF_OUTBOUND_DOMAIN_RESOLVE_METHOD, "1") != "1") return
+        if (MmkvManager.decodeSettingsString(AppConfig.PREF_OUTBOUND_DOMAIN_RESOLVE_METHOD, "1") != "1") {
+            return
+        }
+
         val proxyOutboundList = v2rayConfig.getAllProxyOutbound()
         val dns = v2rayConfig.dns ?: return
         val newHosts = dns.hosts?.toMutableMap() ?: mutableMapOf()
         val preferIpv6 = MmkvManager.decodeSettingsBool(AppConfig.PREF_PREFER_IPV6) == true
+
         for (item in proxyOutboundList) {
             val domain = item.getServerAddress()
-            if (domain.isNullOrEmpty()) continue
+            if (domain.isNullOrEmpty()) {
+                continue
+            }
+
             if (newHosts.containsKey(domain)) {
                 item.ensureSockopt().domainStrategy = "UseIP"
                 item.ensureSockopt().happyEyeballs = V2rayConfig.OutboundBean.StreamSettingsBean.HappyEyeballsBean(
-                    prioritizeIPv6 = preferIpv6, interleave = 2
+                    prioritizeIPv6 = preferIpv6,
+                    interleave = 2
                 )
                 continue
             }
+
             val resolvedIps = HttpUtil.resolveHostToIP(domain, preferIpv6)
-            if (resolvedIps.isNullOrEmpty()) continue
+            if (resolvedIps.isNullOrEmpty()) {
+                continue
+            }
+
             item.ensureSockopt().domainStrategy = "UseIP"
             item.ensureSockopt().happyEyeballs = V2rayConfig.OutboundBean.StreamSettingsBean.HappyEyeballsBean(
-                prioritizeIPv6 = preferIpv6, interleave = 2
+                prioritizeIPv6 = preferIpv6,
+                interleave = 2
             )
-            newHosts[domain] = if (resolvedIps.size == 1) resolvedIps[0] else resolvedIps
+            newHosts[domain] = if (resolvedIps.size == 1) {
+                resolvedIps[0]
+            } else {
+                resolvedIps
+            }
         }
+
         dns.hosts = newHosts
     }
 
+    /**
+     * Convert one profile object into one outbound object.
+     */
     private fun convertProfile2Outbound(profileItem: ProfileItem): V2rayConfig.OutboundBean? {
         return CoreOutboundBuilder.convert(profileItem)
     }
 
     //endregion
 
+
     //region routing related functions
 
+
+    /**
+     * Merge probe settings from all balancer strategies into the runtime config.
+     */
     private fun applyObservability(v2rayConfig: V2rayConfig, strategies: List<BalancerStrategy>) {
-        val allObsSelectors = strategies.mapNotNull { it.observatory?.subjectSelector }.flatten().distinct()
+        val allObsSelectors = strategies
+            .mapNotNull { it.observatory?.subjectSelector }
+            .flatten()
+            .distinct()
         val obsTemplate = strategies.firstNotNullOfOrNull { it.observatory }
         if (obsTemplate != null && allObsSelectors.isNotEmpty()) {
             v2rayConfig.observatory = V2rayConfig.ObservatoryObject(
@@ -989,7 +1214,11 @@ object CoreConfigManager {
                 enableConcurrency = obsTemplate.enableConcurrency
             )
         }
-        val allBurstSelectors = strategies.mapNotNull { it.burstObservatory?.subjectSelector }.flatten().distinct()
+
+        val allBurstSelectors = strategies
+            .mapNotNull { it.burstObservatory?.subjectSelector }
+            .flatten()
+            .distinct()
         val burstTemplate = strategies.firstNotNullOfOrNull { it.burstObservatory }
         if (burstTemplate != null && allBurstSelectors.isNotEmpty()) {
             v2rayConfig.burstObservatory = V2rayConfig.BurstObservatoryObject(
@@ -999,18 +1228,28 @@ object CoreConfigManager {
         }
     }
 
+    /**
+     * Configure routing domain strategy and append enabled user rules.
+     */
     private fun configureRouting(
         configContext: CoreConfigContext,
         v2rayConfig: V2rayConfig,
         policyGroupBalancerTags: Map<String, String>
     ) {
-        v2rayConfig.routing.domainStrategy = MmkvManager.decodeSettingsString(AppConfig.PREF_ROUTING_DOMAIN_STRATEGY) ?: "AsIs"
+
+        v2rayConfig.routing.domainStrategy =
+            MmkvManager.decodeSettingsString(AppConfig.PREF_ROUTING_DOMAIN_STRATEGY)
+                ?: "AsIs"
+
         val rulesetItems = MmkvManager.decodeRoutingRulesets()
         rulesetItems?.forEach { key ->
             appendRoutingUserRule(configContext, key, v2rayConfig, policyGroupBalancerTags)
         }
     }
 
+    /**
+     * Convert one rule item and append it to routing rules.
+     */
     private fun appendRoutingUserRule(
         configContext: CoreConfigContext,
         item: RulesetItem?,
@@ -1018,8 +1257,13 @@ object CoreConfigManager {
         policyGroupBalancerTags: Map<String, String>
     ) {
         val context = configContext.context
-        if (item == null || !item.enabled) return
+        if (item == null || !item.enabled) {
+            return
+        }
+
         val rule = JsonUtil.fromJson(JsonUtil.toJson(item), V2rayConfig.RoutingBean.RulesBean::class.java) ?: return
+
+        // Replace specific geoip rules with ext versions
         rule.ip?.let { ipList ->
             val updatedIpList = ArrayList<String>()
             ipList.forEach { ip ->
@@ -1031,7 +1275,9 @@ object CoreConfigManager {
             }
             rule.ip = updatedIpList
         }
+
         if (SettingsManager.canUseProcessRouting()) {
+            // Convert process package names to UIDs
             rule.process?.let { processList ->
                 if (processList.isNotEmpty()) {
                     val uids = PackageUidResolver.packageNamesToUids(context, processList)
@@ -1041,11 +1287,16 @@ object CoreConfigManager {
         } else {
             rule.process = null
         }
+
         val outboundTag = rule.outboundTag
+
+        // Route rules targeting a custom policy-group tag should hit its balancer.
         policyGroupBalancerTags[outboundTag]?.let { balancerTag ->
             rule.outboundTag = null
             rule.balancerTag = balancerTag
         }
+
+        // If the outbound tag is a custom one that failed to inject, fall back to proxy
         if (!outboundTag.isNullOrBlank()
             && outboundTag !in policyGroupBalancerTags
             && outboundTag !in AppConfig.BUILTIN_OUTBOUND_TAGS
@@ -1054,9 +1305,14 @@ object CoreConfigManager {
             LogUtil.w(AppConfig.TAG, "Outbound tag '$outboundTag' not found, falling back to '${AppConfig.TAG_PROXY}'")
             rule.outboundTag = AppConfig.TAG_PROXY
         }
+
         v2rayConfig.routing.rules.add(rule)
     }
 
+
+    /**
+     * Build balancer and probe settings from one policy-group strategy value.
+     */
     private fun buildBalancerStrategy(
         policyGroupType: String?,
         selector: List<String>,
@@ -1091,6 +1347,9 @@ object CoreConfigManager {
         return BalancerStrategy(balancer, observatory, burstObservatory)
     }
 
+    /**
+     * Carry balancer data plus optional probe settings for later merge.
+     */
     private data class BalancerStrategy(
         val balancer: V2rayConfig.RoutingBean.BalancerBean,
         val observatory: V2rayConfig.ObservatoryObject? = null,
@@ -1100,6 +1359,13 @@ object CoreConfigManager {
     // ------------------------------------------------------------------
     // Custom outbound injection with chain proxy support
     // ------------------------------------------------------------------
+
+    private fun getCurrentMainServerRemarks(): String? {
+        val currId = MmkvManager.getSelectServer()
+        return if (!currId.isNullOrEmpty()) {
+            MmkvManager.decodeServerConfig(currId)?.remarks?.trim()
+        } else null
+    }
 
     private fun resolveCurrentServer(remark: String?): String? {
         if (remark == AppConfig.CURRENT_SERVER) {
@@ -1112,6 +1378,41 @@ object CoreConfigManager {
         return remark
     }
 
+    private fun injectCustomOutbounds(v2rayConfig: V2rayConfig) {
+        val existingTags = v2rayConfig.outbounds.mapTo(mutableSetOf()) { it.tag }
+        val outboundTagMap = mutableMapOf<String, String>()
+
+        val rulesetItems = MmkvManager.decodeRoutingRulesets() ?: return
+        val customOutboundTags = rulesetItems
+            .filter { it.enabled && !AppConfig.BUILTIN_OUTBOUND_TAGS.contains(it.outboundTag) }
+            .map { it.outboundTag }
+            .distinct()
+        LogUtil.d(AppConfig.TAG, "🎯 Custom outbound tags from routing rules: $customOutboundTags")
+
+        for (tag in customOutboundTags) {
+            if (tag in existingTags) {
+                LogUtil.d(AppConfig.TAG, "⏩ Custom outbound '$tag' already injected, skipping")
+                continue
+            }
+            val profile = SettingsManager.getServerViaRemarks(tag) ?: run {
+                LogUtil.w(AppConfig.TAG, "⚠️ No profile found for custom outbound tag '$tag'")
+                continue
+            }
+            val outbound = convertProfile2Outbound(profile) ?: run {
+                LogUtil.w(AppConfig.TAG, "⚠️ Failed to convert profile for '$tag' to outbound")
+                continue
+            }
+            outbound.tag = tag
+
+            applySubscriptionChain(v2rayConfig, profile, outbound, outboundTagMap, existingTags)
+
+            v2rayConfig.outbounds.add(outbound)
+            existingTags.add(tag)
+            outboundTagMap[tag] = tag
+            LogUtil.d(AppConfig.TAG, "✅ Injected custom outbound '$tag'")
+        }
+    }
+
     private fun applySubscriptionChain(
         v2rayConfig: V2rayConfig,
         profile: ProfileItem,
@@ -1120,16 +1421,16 @@ object CoreConfigManager {
         existingTags: MutableSet<String>
     ) {
         var subItem: SubscriptionItem? = null
-        
+
         if (!profile.subscriptionId.isNullOrEmpty()) {
             subItem = MmkvManager.decodeSubscription(profile.subscriptionId)
         }
-        
+
         if (subItem == null) {
             LogUtil.d(AppConfig.TAG, "⚠️ No subscription for profile '${profile.remarks}', cannot apply chain")
             return
         }
-        
+
         val originalTag = outbound.tag
         LogUtil.d(AppConfig.TAG, "🔗 Applying chain for '$originalTag' using subscription ${subItem.remarks}")
         LogUtil.d(AppConfig.TAG, "   prevProfile='${subItem.prevProfile}', nextProfile='${subItem.nextProfile}'")
@@ -1150,16 +1451,16 @@ object CoreConfigManager {
             }
 
             LogUtil.d(AppConfig.TAG, "   $chainType resolved remark: '$resolvedRemark'")
-            
+
             val isCurrentMain = currentMainRemarks != null && resolvedRemark.equals(currentMainRemarks, ignoreCase = true)
-            
+
             // For prev chain: if main server, reuse "proxy" directly
             if (chainType == "prev" && isCurrentMain) {
                 LogUtil.d(AppConfig.TAG, "✅ Prev target is main server – setting dialerProxy to '${AppConfig.TAG_PROXY}'")
                 outbound.ensureSockopt().dialerProxy = AppConfig.TAG_PROXY
                 return
             }
-            
+
             // For next chain (or prev when not main): create numbered outbound
             val existingByTag = v2rayConfig.outbounds.firstOrNull { it.tag == desiredTag }
             if (existingByTag != null) {
@@ -1218,41 +1519,6 @@ object CoreConfigManager {
         }
     }
 
-    private fun injectCustomOutbounds(v2rayConfig: V2rayConfig) {
-        val existingTags = v2rayConfig.outbounds.mapTo(mutableSetOf()) { it.tag }
-        val outboundTagMap = mutableMapOf<String, String>()
-
-        val rulesetItems = MmkvManager.decodeRoutingRulesets() ?: return
-        val customOutboundTags = rulesetItems
-            .filter { it.enabled && !AppConfig.BUILTIN_OUTBOUND_TAGS.contains(it.outboundTag) }
-            .map { it.outboundTag }
-            .distinct()
-        LogUtil.d(AppConfig.TAG, "🎯 Custom outbound tags from routing rules: $customOutboundTags")
-
-        for (tag in customOutboundTags) {
-            if (tag in existingTags) {
-                LogUtil.d(AppConfig.TAG, "⏩ Custom outbound '$tag' already injected, skipping")
-                continue
-            }
-            val profile = SettingsManager.getServerViaRemarks(tag) ?: run {
-                LogUtil.w(AppConfig.TAG, "⚠️ No profile found for custom outbound tag '$tag'")
-                continue
-            }
-            val outbound = convertProfile2Outbound(profile) ?: run {
-                LogUtil.w(AppConfig.TAG, "⚠️ Failed to convert profile for '$tag' to outbound")
-                continue
-            }
-            outbound.tag = tag
-
-            applySubscriptionChain(v2rayConfig, profile, outbound, outboundTagMap, existingTags)
-
-            v2rayConfig.outbounds.add(outbound)
-            existingTags.add(tag)
-            outboundTagMap[tag] = tag
-            LogUtil.d(AppConfig.TAG, "✅ Injected custom outbound '$tag'")
-        }
-    }
-
     //endregion
 }
 '''
@@ -1264,11 +1530,11 @@ def patch_coreconfigmanager():
         return
     backup_kotlin(p)
     write(p, PATCHED_CORECONFIG_MANAGER)
-    print("✓ CoreConfigManager.kt replaced – next hop uses numeric suffix -1")
+    print("✓ CoreConfigManager.kt replaced with full custom outbound support")
 
 def main():
     print("=" * 70)
-    print("Final Patcher – Next Hop named as proxy-<originalTag>-1")
+    print("Final Patcher – works with latest upstream CoreConfigManager.kt")
     print("=" * 70)
 
     try:
@@ -1278,7 +1544,7 @@ def main():
         patch_coreconfigcontextbuilder()
         patch_coreconfigmanager()
         print("\n✅ All patches applied successfully.")
-        print("👉 Rebuild and test – next hop will be named like 'proxy-twitter-1'.")
+        print("👉 Rebuild and test. The real‑ping test should no longer hang when prev proxy is main server.")
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback
