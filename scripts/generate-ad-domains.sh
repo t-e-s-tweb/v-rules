@@ -3,7 +3,7 @@
 gh api https://api.github.com/repos/hagezi/dns-blocklists/contents/wildcard/pro.plus.mini-onlydomains.txt -H "Accept: application/vnd.github.raw" > category-ads-all-raw.txt
 gh api https://api.github.com/repos/m0zgen/dns-hole/contents/dns-blacklist.txt -H "Accept: application/vnd.github.raw" >> category-ads-all-raw.txt
 gh api https://api.github.com/repos/m0zgen/dns-hole/contents/malisious.txt -H "Accept: application/vnd.github.raw" >> category-ads-all-raw.txt
-#gh api https://api.github.com/repos/hagezi/dns-blocklists/contents/wildcard/tif.medium-onlydomains.txt -H "Accept: application/vnd.github.raw" >> category-ads-all-raw.txt
+gh api https://api.github.com/repos/hagezi/dns-blocklists/contents/wildcard/tif.medium-onlydomains.txt -H "Accept: application/vnd.github.raw" > tifmedium.txt
 gh api https://api.github.com/repos/phishdestroy/destroylist/contents/list.txt -H "Accept: application/vnd.github.raw" >> category-ads-all-raw.txt
 gh api https://api.github.com/repos/DNSBunker/CTI/contents/domains.txt >> category-ads-all-raw.txt
 
@@ -25,3 +25,4 @@ cat category-ads-all-temp-temp.txt | LC_ALL=C grep -f category-ads-all-sub.txt |
 comm -23 category-ads-all-temp-temp.txt category-ads-all-redundant-sub.txt > category-ads-all.txt
 rm -f category-ads-all-raw.txt whitelist-raw.txt category-ads-all-temp.txt whitelist-temp.txt
 mv category-ads-all.txt domains
+mv tifmedium.txt domains
