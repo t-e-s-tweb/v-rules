@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 """
-Final patcher – works with latest upstream CoreConfigManager.kt
-- Adds CURRENT_SERVER constant.
-- Enhances subscription editor dropdown.
-- Resolves [Current Server] in proxy chains.
-- Replaces CoreConfigManager with full custom outbound + chain support.
+Complete patcher for v2rayNG – latest upstream CoreConfigManager + DNS host fix + custom outbound injection.
 """
 
 import re
@@ -34,13 +30,10 @@ def patch_appconfig():
     if '"__CURRENT_SERVER__"' in c:
         print("• AppConfig: CURRENT_SERVER already present")
         return
-    # Find BUILTIN_OUTBOUND_TAGS and add after it, or fallback to end of file
+    # Find BUILTIN_OUTBOUND_TAGS and add after it
     marker = "    val BUILTIN_OUTBOUND_TAGS = setOf("
     if marker in c:
-        # Insert after the setOf block? Actually just add at the end of the file is simpler.
-        # We'll insert after the BUILTIN_OUTBOUND_TAGS definition.
         insert_pos = c.find(marker) + len(marker)
-        # Find the closing brace of the set
         brace_count = 1
         i = insert_pos
         while i < len(c) and brace_count > 0:
@@ -55,7 +48,6 @@ def patch_appconfig():
         write(p, c)
         print("✓ AppConfig: added CURRENT_SERVER")
     else:
-        # Fallback: add at end of file before the last '}'
         last_brace = c.rfind('}')
         if last_brace != -1:
             c = c[:last_brace] + "\n    const val CURRENT_SERVER = \"__CURRENT_SERVER__\"\n" + c[last_brace:]
@@ -65,7 +57,7 @@ def patch_appconfig():
             print("✗ AppConfig: could not add CURRENT_SERVER")
 
 # ----------------------------------------------------------------------
-# 2. SubEditActivity.kt – enhance dropdown (if not already)
+# 2. SubEditActivity.kt – enhance dropdown with "None" and "[Current Server]"
 # ----------------------------------------------------------------------
 def patch_subedit():
     p = BASE / "app/src/main/java/com/v2ray/ang/ui/SubEditActivity.kt"
@@ -74,7 +66,6 @@ def patch_subedit():
         return
     c = read(p)
 
-    # Only patch if the expected structures exist; otherwise skip.
     old_setup_inputs = '''    private fun setupProfileRemarkInputs() {
         val suggestions = SettingsManager.getProfileRemarks(
             excludeConfigTypes = setOf(
@@ -197,7 +188,7 @@ def patch_subedit():
     print("✓ SubEditActivity: all enhancements applied")
 
 # ----------------------------------------------------------------------
-# 3. strings.xml – add None / [Current Server]
+# 3. strings.xml – add "None" and "[Current Server]"
 # ----------------------------------------------------------------------
 def patch_strings():
     p = BASE / "app/src/main/res/values/strings.xml"
@@ -231,7 +222,6 @@ def patch_coreconfigcontextbuilder():
     c = read(p)
 
     if "private fun resolveCurrentServer" not in c:
-        # Insert before the last '}'
         lines = c.splitlines()
         for i in range(len(lines) - 1, -1, -1):
             if lines[i].strip() == '}':
@@ -303,7 +293,7 @@ def patch_coreconfigcontextbuilder():
     write(p, c)
 
 # ----------------------------------------------------------------------
-# 5. CoreConfigManager.kt – complete replacement with all fixes
+# 5. CoreConfigManager.kt – latest upstream + DNS host fix + custom outbound injection
 # ----------------------------------------------------------------------
 PATCHED_CORECONFIG_MANAGER = r'''package com.v2ray.ang.core
 
@@ -481,6 +471,7 @@ object CoreConfigManager {
         configureFakeDns(v2rayConfig)
         configureDns(v2rayConfig, policyGroupBalancerTags)
         configureLocalDns(v2rayConfig)
+        configureRootModeDns(v2rayConfig)
 
         // (added by getDns / getCustomLocalDns) to use the balancer, then add
         // the catch-all balancer rule.
@@ -609,7 +600,6 @@ object CoreConfigManager {
             }
 
             if (isMainServer && profileIndex == 0) {
-                // First hop is main server – treat as single-hop, set dialerProxy directly to "proxy"
                 LogUtil.d(AppConfig.TAG, "♻️ Hop 0 is current main server ('$profileRemarks') – setting ${resolvedOutbound.tag}.dialerProxy = 'proxy'")
                 val customOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == resolvedOutbound.tag }
                 if (customOutbound != null) {
@@ -619,7 +609,6 @@ object CoreConfigManager {
             }
 
             if (isMainServer && profileIndex > 0) {
-                // Non-first hop is main server – skip creating new outbound, wire previous to "proxy"
                 LogUtil.d(AppConfig.TAG, "♻️ Hop $profileIndex is current main server ('$profileRemarks') – chaining previous to 'proxy'")
                 if (prevOutboundTag != null) {
                     val prevOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == prevOutboundTag }
@@ -669,7 +658,6 @@ object CoreConfigManager {
             prevOutboundTag = desiredTag
         }
 
-        // If we never set any dialerProxy (all hops were main server after first?), fallback
         if (prevOutboundTag == null) {
             val customOutboundTag = resolvedOutbound.tag
             val customOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == customOutboundTag }
@@ -809,8 +797,10 @@ object CoreConfigManager {
         val vpn = SettingsManager.isVpnMode()
         val useHev = SettingsManager.isUsingHevTun()
         val forcedByHev = vpn && useHev
+        val forcedBySocksRoot = SettingsManager.isRootMode()
+                || MmkvManager.decodeSettingsBool(AppConfig.PREF_ROOT_LAN_SHARING)
 
-        val enableLocalProxy = forcedByHev || MmkvManager.decodeSettingsBool(AppConfig.PREF_ENABLE_LOCAL_PROXY, true)
+        val enableLocalProxy = forcedByHev || forcedBySocksRoot || MmkvManager.decodeSettingsBool(AppConfig.PREF_ENABLE_LOCAL_PROXY, true)
 
         val socksPort = SettingsManager.getSocksPort()
         val socksUsername = SettingsManager.getSocksUsername()
@@ -980,6 +970,39 @@ object CoreConfigManager {
     }
 
     /**
+     * In the root mode the whole device's traffic (incl. raw DNS) is funneled
+     * into the core's SOCKS inbound, exactly like the VPN+hev path. Hijack port-53 to the
+     * core's DNS module so queries are resolved via the configured resolver through the
+     * proxy instead of leaking to (or being mis-resolved by) the local network resolver.
+     * Independent of the local-DNS toggle, which is not exposed for root mode.
+     */
+    private fun configureRootModeDns(v2rayConfig: V2rayConfig) {
+        if (!SettingsManager.isRootMode()) return
+
+        if (v2rayConfig.routing.rules.none { it.outboundTag == "dns-out" && it.port == "53" }) {
+            v2rayConfig.routing.rules.add(
+                0,
+                V2rayConfig.RoutingBean.RulesBean(
+                    inboundTag = arrayListOf("socks"),
+                    outboundTag = "dns-out",
+                    port = "53",
+                )
+            )
+        }
+        if (v2rayConfig.outbounds.none { it.protocol == "dns" && it.tag == "dns-out" }) {
+            v2rayConfig.outbounds.add(
+                V2rayConfig.OutboundBean(
+                    protocol = "dns",
+                    tag = "dns-out",
+                    settings = null,
+                    streamSettings = null,
+                    mux = null
+                )
+            )
+        }
+    }
+
+    /**
      * Remove speed-test runtime sections when the feature is disabled.
      */
     private fun applySpeedDisabled(v2rayConfig: V2rayConfig) {
@@ -1081,13 +1104,19 @@ object CoreConfigManager {
         hosts[AppConfig.DNS_SB_DOMAIN] = AppConfig.DNS_SB_ADDRESSES
         hosts[AppConfig.DNS_YANDEX_DOMAIN] = AppConfig.DNS_YANDEX_ADDRESSES
 
-        //User DNS hosts
+        //User DNS hosts – updated per commit 68abeb4 (supports BIND-style format)
+        // Format: "domain address1 address2" per line (one or more addresses)
         val userHosts = MmkvManager.decodeSettingsString(AppConfig.PREF_DNS_HOSTS)
         if (userHosts.isNotNullEmpty()) {
-            val userHostsMap = userHosts?.split(",")
+            val userHostsMap = userHosts?.lines()
                 ?.filter { it.isNotEmpty() }
-                ?.filter { it.contains(":") }
-                ?.associate { it.split(":").let { (k, v) -> k to v } }
+                ?.filter { it.contains(" ") }
+                ?.associate { line ->
+                    val parts = line.trim().split("\\s+".toRegex())
+                    val key = parts[0]
+                    val values = parts.drop(1)
+                    key to if (values.size == 1) values[0] else values
+                }
             if (userHostsMap != null) {
                 hosts.putAll(userHostsMap)
             }
@@ -1530,11 +1559,11 @@ def patch_coreconfigmanager():
         return
     backup_kotlin(p)
     write(p, PATCHED_CORECONFIG_MANAGER)
-    print("✓ CoreConfigManager.kt replaced with full custom outbound support")
+    print("✓ CoreConfigManager.kt replaced – latest upstream + DNS host fix + custom outbound injection")
 
 def main():
     print("=" * 70)
-    print("Final Patcher – works with latest upstream CoreConfigManager.kt")
+    print("Complete Patcher – latest upstream + DNS host fix + custom outbound injection")
     print("=" * 70)
 
     try:
@@ -1544,7 +1573,7 @@ def main():
         patch_coreconfigcontextbuilder()
         patch_coreconfigmanager()
         print("\n✅ All patches applied successfully.")
-        print("👉 Rebuild and test. The real‑ping test should no longer hang when prev proxy is main server.")
+        print("👉 Rebuild and test.")
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback
