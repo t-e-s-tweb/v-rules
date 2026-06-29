@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Complete patcher for v2rayNG – latest upstream CoreConfigManager + DNS host fix + custom outbound injection.
+Complete patcher for v2rayNG – latest upstream + DNS host fix + DNS parallel query + custom outbound injection.
 """
 
 import re
@@ -22,39 +22,51 @@ def read(p): return p.read_text(encoding="utf-8")
 def write(p, s): p.write_text(s, encoding="utf-8")
 
 # ----------------------------------------------------------------------
-# 1. AppConfig.kt – add CURRENT_SERVER constant
+# 1. AppConfig.kt – add CURRENT_SERVER + DNS parallel/stale prefs
 # ----------------------------------------------------------------------
 def patch_appconfig():
     p = BASE / "app/src/main/java/com/v2ray/ang/AppConfig.kt"
     c = read(p)
-    if '"__CURRENT_SERVER__"' in c:
-        print("• AppConfig: CURRENT_SERVER already present")
-        return
-    # Find BUILTIN_OUTBOUND_TAGS and add after it
-    marker = "    val BUILTIN_OUTBOUND_TAGS = setOf("
-    if marker in c:
-        insert_pos = c.find(marker) + len(marker)
-        brace_count = 1
-        i = insert_pos
-        while i < len(c) and brace_count > 0:
-            if c[i] == '(':
-                brace_count += 1
-            elif c[i] == ')':
-                brace_count -= 1
-            i += 1
-        insert_at = i
-        const_line = "\n    const val CURRENT_SERVER = \"__CURRENT_SERVER__\""
-        c = c[:insert_at] + const_line + c[insert_at:]
-        write(p, c)
-        print("✓ AppConfig: added CURRENT_SERVER")
-    else:
-        last_brace = c.rfind('}')
-        if last_brace != -1:
-            c = c[:last_brace] + "\n    const val CURRENT_SERVER = \"__CURRENT_SERVER__\"\n" + c[last_brace:]
-            write(p, c)
-            print("✓ AppConfig: added CURRENT_SERVER (fallback)")
+
+    # Add CURRENT_SERVER if missing
+    if '"__CURRENT_SERVER__"' not in c:
+        marker = "    val BUILTIN_OUTBOUND_TAGS = setOf("
+        if marker in c:
+            insert_pos = c.find(marker) + len(marker)
+            brace_count = 1
+            i = insert_pos
+            while i < len(c) and brace_count > 0:
+                if c[i] == '(':
+                    brace_count += 1
+                elif c[i] == ')':
+                    brace_count -= 1
+                i += 1
+            insert_at = i
+            const_line = "\n    const val CURRENT_SERVER = \"__CURRENT_SERVER__\""
+            c = c[:insert_at] + const_line + c[insert_at:]
+            print("✓ AppConfig: added CURRENT_SERVER")
         else:
-            print("✗ AppConfig: could not add CURRENT_SERVER")
+            last_brace = c.rfind('}')
+            if last_brace != -1:
+                c = c[:last_brace] + "\n    const val CURRENT_SERVER = \"__CURRENT_SERVER__\"\n" + c[last_brace:]
+                print("✓ AppConfig: added CURRENT_SERVER (fallback)")
+            else:
+                print("✗ AppConfig: could not add CURRENT_SERVER")
+
+    # Add DNS parallel query and serve stale preferences if missing
+    if "PREF_DNS_PARALLEL_QUERY" not in c:
+        # Insert after PREF_DNS_HOSTS
+        old = "    const val PREF_DNS_HOSTS = \"pref_dns_hosts\""
+        new = '''    const val PREF_DNS_HOSTS = "pref_dns_hosts"
+    const val PREF_DNS_PARALLEL_QUERY = "pref_dns_parallel_query"
+    const val PREF_DNS_SERVE_STALE = "pref_dns_serve_stale"'''
+        if old in c:
+            c = c.replace(old, new, 1)
+            print("✓ AppConfig: added DNS parallel query preferences")
+        else:
+            print("⚠ AppConfig: PREF_DNS_HOSTS not found, skipping DNS preferences")
+
+    write(p, c)
 
 # ----------------------------------------------------------------------
 # 2. SubEditActivity.kt – enhance dropdown with "None" and "[Current Server]"
@@ -293,7 +305,7 @@ def patch_coreconfigcontextbuilder():
     write(p, c)
 
 # ----------------------------------------------------------------------
-# 5. CoreConfigManager.kt – latest upstream + DNS host fix + custom outbound injection
+# 5. CoreConfigManager.kt – latest upstream + DNS host fix + DNS parallel query + custom outbound injection
 # ----------------------------------------------------------------------
 PATCHED_CORECONFIG_MANAGER = r'''package com.v2ray.ang.core
 
@@ -1104,8 +1116,7 @@ object CoreConfigManager {
         hosts[AppConfig.DNS_SB_DOMAIN] = AppConfig.DNS_SB_ADDRESSES
         hosts[AppConfig.DNS_YANDEX_DOMAIN] = AppConfig.DNS_YANDEX_ADDRESSES
 
-        //User DNS hosts – updated per commit 68abeb4 (supports BIND-style format)
-        // Format: "domain address1 address2" per line (one or more addresses)
+        //User DNS hosts – supports BIND-style format: "domain address1 address2" per line
         val userHosts = MmkvManager.decodeSettingsString(AppConfig.PREF_DNS_HOSTS)
         if (userHosts.isNotNullEmpty()) {
             val userHostsMap = userHosts?.lines()
@@ -1129,6 +1140,14 @@ object CoreConfigManager {
             tag = AppConfig.TAG_DNS,
             enableParallelQuery = if ((domesticDns.size + remoteDns.size) > 2) true else null
         )
+
+        // DNS parallel query and serve stale from preferences (commit f9c3e6a)
+        if (MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_SERVE_STALE, false) == true) {
+            v2rayConfig.dns?.serveStale = true
+        }
+        if (MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_PARALLEL_QUERY, false) == true) {
+            v2rayConfig.dns?.enableParallelQuery = true
+        }
 
         // DNS routing
         v2rayConfig.routing.rules.add(
@@ -1559,11 +1578,11 @@ def patch_coreconfigmanager():
         return
     backup_kotlin(p)
     write(p, PATCHED_CORECONFIG_MANAGER)
-    print("✓ CoreConfigManager.kt replaced – latest upstream + DNS host fix + custom outbound injection")
+    print("✓ CoreConfigManager.kt replaced – latest upstream + DNS host fix + DNS parallel query + custom outbound injection")
 
 def main():
     print("=" * 70)
-    print("Complete Patcher – latest upstream + DNS host fix + custom outbound injection")
+    print("Complete Patcher – latest upstream + DNS host fix + DNS parallel query + custom outbound injection")
     print("=" * 70)
 
     try:
