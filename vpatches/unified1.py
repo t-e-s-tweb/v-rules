@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-v2rayNG Dropdown Slowness Fix – Final (with precise replacement)
+v2rayNG Dropdown Slowness Fix – Corrected
+
+- Caches getProfileRemarks() with versioning
+- Invalidates cache on server list changes
+- Pre-warms cache on app startup
+- Adds heightIn(300.dp) to ExposedDropdownMenu so it scrolls instead of expanding infinitely
 """
 
 import os
@@ -63,31 +68,28 @@ PREWARM_CODE = """        // Pre-warm profile remarks cache for fast dropdowns
 """
 
 # ----------------------------------------------------------------------
-# Correct replacement for FormFields.kt
+# Correct replacement for FormFields.kt – keep forEach, add heightIn
 NEW_DROPDOWN_CALL = """    ExposedDropdownMenu(
         expanded = expanded,
         onDismissRequest = { expanded = false },
         modifier = Modifier.heightIn(max = 300.dp),
+        scrollState = menuScrollState,
         containerColor = MaterialTheme.colorScheme.surface
     ) {
-        LazyColumn {
-            items(options) { option ->
-                DropdownMenuItem(
-                    text = { Text(option) },
-                    onClick = {
-                        onValueChange(option)
-                        expanded = false
-                        focusManager.clearFocus()
-                    }
-                )
-            }
+        options.forEach { option ->
+            DropdownMenuItem(
+                text = { Text(option) },
+                onClick = {
+                    onValueChange(option)
+                    expanded = false
+                    focusManager.clearFocus()
+                }
+            )
         }
     }"""
 
 REQUIRED_IMPORTS = [
     "import androidx.compose.foundation.layout.heightIn",
-    "import androidx.compose.foundation.lazy.LazyColumn",
-    "import androidx.compose.foundation.lazy.items",
 ]
 
 # ----------------------------------------------------------------------
@@ -105,7 +107,6 @@ def write_file(path, content):
 
 
 def find_matching_brace(text, start_pos):
-    """Return position of matching closing brace."""
     depth = 0
     for i in range(start_pos, len(text)):
         ch = text[i]
@@ -219,7 +220,7 @@ def patch_main_activity(content):
 
 
 def patch_form_fields(content):
-    # 1. Add missing imports
+    # 1. Add missing imports (only heightIn)
     import_block = ""
     for imp in REQUIRED_IMPORTS:
         if imp not in content:
@@ -238,18 +239,12 @@ def patch_form_fields(content):
             content = import_block + content
 
     # 2. Locate the ExposedDropdownMenu call and replace it
-    # Find the start of the call: "ExposedDropdownMenu("
     start_idx = content.find("ExposedDropdownMenu(")
     if start_idx == -1:
         print("[ERROR] Could not find 'ExposedDropdownMenu(' in FormFields.kt")
         return content
 
-    # Find the opening brace of the block (the one after the parameters)
-    # We need to skip the parentheses of the call. We'll find the matching ')' that ends the parameters.
-    # Then the next '{' is the block opening.
-    # However, we can simply find the first '{' after start_idx, but there might be nested braces in default parameters? Not likely.
-    # We'll assume the call is like: ExposedDropdownMenu(...) { ... }
-    # So find the matching ')' for the parameters first.
+    # Find the matching ')' for the parameters
     paren_depth = 0
     params_end = -1
     for i in range(start_idx + len("ExposedDropdownMenu("), len(content)):
@@ -266,7 +261,7 @@ def patch_form_fields(content):
         print("[ERROR] Could not find closing ')' for ExposedDropdownMenu parameters")
         return content
 
-    # Now find the opening brace of the block after the ')'
+    # Find the opening brace of the block after the ')'
     brace_pos = content.find("{", params_end)
     if brace_pos == -1:
         print("[ERROR] Could not find opening brace for ExposedDropdownMenu block")
@@ -280,7 +275,7 @@ def patch_form_fields(content):
 
     # Replace the entire call from start_idx to block_end (inclusive)
     content = content[:start_idx] + NEW_DROPDOWN_CALL + content[block_end+1:]
-    print("[INFO] Replaced ExposedDropdownMenu with LazyColumn version")
+    print("[INFO] Replaced ExposedDropdownMenu with height-limited version")
 
     return content
 
@@ -341,6 +336,6 @@ def main(project_root):
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: python fix_all_slowdowns_final.py <project_root>")
+        print("Usage: python fix_dropdown_final.py <project_root>")
         sys.exit(1)
     main(sys.argv[1])
