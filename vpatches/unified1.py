@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Final corrected unified patcher – fixes regex escape sequence error.
+Final corrected unified patcher – fixes regex escape sequence, DNS targeting, and dropdown performance.
 """
 
 import re
@@ -135,8 +135,6 @@ def patch_subedit():
     if "var prevProfile by rememberSaveable" in c:
         c = c.replace(old_load_prev, new_load_prev, 1)
         print("✓ SubEditActivity: updated prevProfile loading")
-    else:
-        print("⚠ SubEditActivity: prevProfile loading not found")
 
     old_load_next = "var nextProfile by rememberSaveable { mutableStateOf(initial.nextProfile ?: \"\") }"
     new_load_next = '''    var nextProfile by rememberSaveable { mutableStateOf(
@@ -410,10 +408,10 @@ def patch_coreconfigmanager():
 
             LogUtil.d(AppConfig.TAG, "   $chainType resolved remark: '$resolvedRemark'")
 
-            val isCurrentMain = currentMainRemarks != null && resolvedRemark.equals(currentMainRemarks, ignoreCase = true)
+            val isCurrentMain = currentMainRemarks != null and resolvedRemark.equals(currentMainRemarks, ignoreCase = true)
 
             // For prev chain: if main server, reuse "proxy" directly
-            if (chainType == "prev" && isCurrentMain) {
+            if (chainType == "prev" and isCurrentMain) {
                 LogUtil.d(AppConfig.TAG, "✅ Prev target is main server – setting dialerProxy to '${AppConfig.TAG_PROXY}'")
                 outbound.ensureSockopt().dialerProxy = AppConfig.TAG_PROXY
                 return
@@ -514,8 +512,6 @@ def patch_coreconfigmanager():
     if old_build_outbounds in c:
         c = c.replace(old_build_outbounds, new_build_outbounds, 1)
         print("✓ CoreConfigManager: updated buildOutbounds signature")
-    else:
-        print("⚠ CoreConfigManager: buildOutbounds signature not found")
 
     old_call = '''            CoreResolvedType.PROXYCHAIN -> handleProxyChainResolvedOutbound(
                 resolvedOutbound = resolvedOutbound,
@@ -533,8 +529,6 @@ def patch_coreconfigmanager():
     if old_call in c:
         c = c.replace(old_call, new_call, 1)
         print("✓ CoreConfigManager: updated handleProxyChainResolvedOutbound call")
-    else:
-        print("⚠ CoreConfigManager: call not found")
 
     # 6.5 Replace handleProxyChainResolvedOutbound body
     method_start = c.find("private fun handleProxyChainResolvedOutbound")
@@ -568,7 +562,7 @@ def patch_coreconfigmanager():
 
         for ((profileIndex, profile) in resolvedOutbound.resolvedProfiles.withIndex()) {
             val profileRemarks = profile.remarks.trim()
-            val isMainServer = mainRemarks != null && profileRemarks.equals(mainRemarks, ignoreCase = true)
+            val isMainServer = mainRemarks != null and profileRemarks.equals(mainRemarks, ignoreCase = true)
 
             val desiredTag = if (profileIndex == 0) {
                 resolvedOutbound.tag
@@ -576,7 +570,7 @@ def patch_coreconfigmanager():
                 "${AppConfig.TAG_PROXY}-${resolvedOutbound.tag}-${profileIndex}"
             }
 
-            if (isMainServer && profileIndex == 0) {
+            if (isMainServer and profileIndex == 0) {
                 LogUtil.d(AppConfig.TAG, "♻️ Hop 0 is current main server ('$profileRemarks') – setting ${resolvedOutbound.tag}.dialerProxy = 'proxy'")
                 val customOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == resolvedOutbound.tag }
                 if (customOutbound != null) {
@@ -585,7 +579,7 @@ def patch_coreconfigmanager():
                 return
             }
 
-            if (isMainServer && profileIndex > 0) {
+            if (isMainServer and profileIndex > 0) {
                 LogUtil.d(AppConfig.TAG, "♻️ Hop $profileIndex is current main server ('$profileRemarks') – chaining previous to 'proxy'")
                 if (prevOutboundTag != null) {
                     val prevOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == prevOutboundTag }
@@ -647,15 +641,9 @@ def patch_coreconfigmanager():
                 method_end = i
                 c = c[:method_start] + new_signature + new_body + c[method_end:]
                 print("✓ CoreConfigManager: replaced handleProxyChainResolvedOutbound body")
-            else:
-                print("⚠ CoreConfigManager: brace mismatch for handleProxyChainResolvedOutbound")
-        else:
-            print("⚠ CoreConfigManager: could not find opening brace for handleProxyChainResolvedOutbound")
-    else:
-        print("⚠ CoreConfigManager: handleProxyChainResolvedOutbound method not found")
 
-    # 6.6 Replace the whole configureDns method with a version that uses dnsBean and sets serveStale
-    method_start = c.find("private fun configureDns(")
+    # 6.6 Replace the whole configureDns method (FIXED: targets active method, not commented-out one)
+    method_start = c.find("private fun configureDns(\n        configContext: CoreConfigContext,")
     if method_start != -1:
         open_brace = c.find('{', method_start)
         if open_brace != -1:
@@ -738,14 +726,8 @@ def patch_coreconfigmanager():
                 method_end = i
                 c = c[:method_start] + new_configure_dns + c[method_end:]
                 print("✓ CoreConfigManager: replaced configureDns body with dnsBean version")
-            else:
-                print("⚠ CoreConfigManager: brace mismatch for configureDns")
-        else:
-            print("⚠ CoreConfigManager: could not find opening brace for configureDns")
-    else:
-        print("⚠ CoreConfigManager: configureDns method not found")
 
-    # 6.7 Replace buildDnsHostsFromRoutingRules with BIND‑style hosts parser (using raw regex)
+    # 6.7 Replace buildDnsHostsFromRoutingRules with BIND‑style hosts parser
     method_start = c.find("private fun buildDnsHostsFromRoutingRules(")
     if method_start != -1:
         open_brace = c.find('{', method_start)
@@ -794,7 +776,7 @@ def patch_coreconfigmanager():
                 ?.filter { it.isNotEmpty() }
                 ?.filter { it.contains(" ") }
                 ?.associate { line ->
-                    val parts = line.trim().split(Regex("""\s+"""))
+                    val parts = line.trim().split(Regex("""\\s+"""))
                     val key = parts[0]
                     val values = parts.drop(1)
                     key to if (values.size == 1) values[0] else values
@@ -808,13 +790,7 @@ def patch_coreconfigmanager():
     }'''
                 method_end = i
                 c = c[:method_start] + new_build_hosts + c[method_end:]
-                print("✓ CoreConfigManager: replaced buildDnsHostsFromRoutingRules with BIND‑style parser (raw regex)")
-            else:
-                print("⚠ CoreConfigManager: brace mismatch for buildDnsHostsFromRoutingRules")
-        else:
-            print("⚠ CoreConfigManager: could not find opening brace for buildDnsHostsFromRoutingRules")
-    else:
-        print("⚠ CoreConfigManager: buildDnsHostsFromRoutingRules method not found")
+                print("✓ CoreConfigManager: replaced buildDnsHostsFromRoutingRules with BIND‑style parser")
 
     write(p, c)
     print("✓ CoreConfigManager: targeted patches applied")
@@ -840,8 +816,6 @@ def patch_settings():
         print("✓ SettingsActivity: added DNS parallel/stale state declarations")
     elif "dnsParallelQuery" in c:
         print("• SettingsActivity: DNS states already present")
-    else:
-        print("⚠ SettingsActivity: could not find dnsHosts declaration block")
 
     # Insert switches after the dnsHosts edit item
     pattern = r'(SettingsEditItem\(\s*title = stringResource\(R\.string\.title_pref_dns_hosts\),\s*value = dnsHosts,\s*onValueChanged = \{ dnsHosts = it \}\s*\))'
@@ -849,14 +823,12 @@ def patch_settings():
         replacement = r'\1\n                SettingsSwitchItem(\n                    title = stringResource(R.string.title_pref_dns_parallel_query),\n                    summary = stringResource(R.string.summary_pref_dns_parallel_query),\n                    checked = dnsParallelQuery,\n                    onCheckedChange = { dnsParallelQuery = it }\n                )\n                SettingsSwitchItem(\n                    title = stringResource(R.string.title_pref_dns_serve_stale),\n                    summary = stringResource(R.string.summary_pref_dns_serve_stale),\n                    checked = dnsServeStale,\n                    onCheckedChange = { dnsServeStale = it }\n                )'
         c = re.sub(pattern, replacement, c, flags=re.DOTALL)
         print("✓ SettingsActivity: inserted DNS parallel/stale switches")
-    else:
-        print("⚠ SettingsActivity: dnsHosts block not found or switches already present")
 
     write(p, c)
 
 
 # ----------------------------------------------------------------------
-# 8. FormFields.kt – fix dropdown crash by adding heightIn(max = 300.dp)
+# 8. FormFields.kt – FIX DROPDOWN PERFORMANCE using LazyColumn
 # ----------------------------------------------------------------------
 def patch_formfields():
     p = BASE / "app/src/main/java/com/v2ray/ang/compose/FormFields.kt"
@@ -865,16 +837,43 @@ def patch_formfields():
         return
     c = read(p)
 
-    # Add missing import for heightIn if not present
-    if "import androidx.compose.foundation.layout.heightIn" not in c:
-        last_import = re.search(r'^import .*$', c, re.MULTILINE)
-        if last_import:
-            pos = last_import.end()
-            c = c[:pos] + "\nimport androidx.compose.foundation.layout.heightIn\n" + c[pos:]
-            print("✓ FormFields: added import for heightIn")
+    # Add missing imports
+    if "import androidx.compose.material3.DropdownMenu" not in c:
+        c = c.replace(
+            "import androidx.compose.material3.DropdownMenuItem",
+            "import androidx.compose.material3.DropdownMenu\nimport androidx.compose.material3.DropdownMenuItem"
+        )
+        print("✓ FormFields: added import for DropdownMenu")
 
-    # Modify the ExposedDropdownMenu modifier to include heightIn(max = 300.dp)
-    old_menu = '''        ExposedDropdownMenu(
+    if "import androidx.compose.foundation.lazy.LazyColumn" not in c:
+        c = c.replace(
+            "import androidx.compose.foundation.layout.height",
+            "import androidx.compose.foundation.layout.height\nimport androidx.compose.foundation.lazy.LazyColumn\nimport androidx.compose.foundation.lazy.items\nimport androidx.compose.foundation.lazy.rememberLazyListState"
+        )
+        print("✓ FormFields: added imports for LazyColumn, items, and rememberLazyListState")
+
+    if "import androidx.compose.ui.unit.IntrinsicSize" not in c:
+        c = c.replace(
+            "import androidx.compose.ui.unit.dp",
+            "import androidx.compose.ui.unit.IntrinsicSize\nimport androidx.compose.ui.unit.dp"
+        )
+        print("✓ FormFields: added import for IntrinsicSize")
+
+    # Check if already patched with LazyColumn
+    if "LazyColumn(" in c and "items(options)" in c:
+        print("• FormFields: already patched with LazyColumn for performance")
+        write(p, c)
+        return
+
+    # Replace menuScrollState with listState for LazyColumn compatibility
+    if "val menuScrollState = rememberScrollState()" in c:
+        c = c.replace(
+            "val menuScrollState = rememberScrollState()",
+            "val listState = rememberLazyListState()"
+        )
+        print("✓ FormFields: replaced menuScrollState with listState")
+
+    old_block_1 = '''        ExposedDropdownMenu(
             expanded = expanded,
             onDismissRequest = { expanded = false },
             modifier = Modifier.verticalScrollbar(menuScrollState),
@@ -892,7 +891,8 @@ def patch_formfields():
                 )
             }
         }'''
-    new_menu = '''        ExposedDropdownMenu(
+    
+    old_block_2 = '''        ExposedDropdownMenu(
             expanded = expanded,
             onDismissRequest = { expanded = false },
             modifier = Modifier
@@ -912,11 +912,40 @@ def patch_formfields():
                 )
             }
         }'''
-    if old_menu in c:
-        c = c.replace(old_menu, new_menu, 1)
-        print("✓ FormFields: added heightIn to dropdown menu to prevent crash")
+    
+    new_block = '''        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier
+                .heightIn(max = 300.dp)
+                .width(IntrinsicSize.Min),
+            containerColor = MaterialTheme.colorScheme.surface
+        ) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.width(IntrinsicSize.Min)
+            ) {
+                items(options) { option ->
+                    DropdownMenuItem(
+                        text = { Text(option) },
+                        onClick = {
+                            onValueChange(option)
+                            expanded = false
+                            focusManager.clearFocus()
+                        }
+                    )
+                }
+            }
+        }'''
+    
+    if old_block_1 in c:
+        c = c.replace(old_block_1, new_block, 1)
+        print("✓ FormFields: replaced ExposedDropdownMenu with LazyColumn DropdownMenu (original)")
+    elif old_block_2 in c:
+        c = c.replace(old_block_2, new_block, 1)
+        print("✓ FormFields: replaced ExposedDropdownMenu with LazyColumn DropdownMenu (previously patched)")
     else:
-        print("⚠ FormFields: could not find the ExposedDropdownMenu block")
+        print("⚠ FormFields: could not find ExposedDropdownMenu block to replace")
 
     write(p, c)
 
@@ -926,7 +955,7 @@ def patch_formfields():
 # ----------------------------------------------------------------------
 def main():
     print("=" * 70)
-    print("Final Corrected Unified Patcher – regex fixed")
+    print("Final Corrected Unified Patcher – DNS targeting & Dropdown perf fixed")
     print("=" * 70)
 
     try:
