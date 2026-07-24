@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
 """
-v2rayNG Dropdown Slowness Fix v2 (robust)
+v2rayNG Dropdown Slowness Fix – Final
 
-- Replaces getProfileRemarks() with a cached version
-- Invalidates cache on any server list modification
+- Caches getProfileRemarks() results with versioning
+- Invalidates cache on all server list modifications
 - Pre-warms cache on app startup
-- Logs cache hits/misses for debugging
+- Uses LazyColumn inside dropdown for virtualization
 """
 
 import os
 import re
 import sys
 
+# File paths relative to project root
 SETTINGS_FILE = "V2rayNG/app/src/main/java/com/v2ray/ang/handler/SettingsManager.kt"
 MMKV_FILE = "V2rayNG/app/src/main/java/com/v2ray/ang/handler/MmkvManager.kt"
 MAIN_ACTIVITY_FILE = "V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainActivity.kt"
+FORM_FIELDS_FILE = "V2rayNG/app/src/main/java/com/v2ray/ang/compose/FormFields.kt"
 
 # ----------------------------------------------------------------------
-# New SettingsManager code
+# Patches for SettingsManager.kt
 
 NEW_SETTINGS_CACHE_FIELDS = """
     // Cached profile remarks with versioning
@@ -59,13 +61,55 @@ NEW_GET_PROFILE_REMARKS_BODY = """
 INVALIDATION_LINE = "        SettingsManager.invalidateProfileRemarksCache()\n"
 
 # ----------------------------------------------------------------------
-# New MainActivity pre-warm code
+# Patches for MainActivity.kt
 
 PREWARM_CODE = """        // Pre-warm profile remarks cache for fast dropdowns
         lifecycleScope.launch(Dispatchers.IO) {
             SettingsManager.getProfileRemarks()
             SettingsManager.getProfileRemarks(setOf(EConfigType.CUSTOM, EConfigType.POLICYGROUP, EConfigType.PROXYCHAIN))
         }
+"""
+
+# ----------------------------------------------------------------------
+# Patches for FormFields.kt
+
+# We need to replace the ExposedDropdownMenu content.
+# The original block:
+# ExposedDropdownMenu(
+#     expanded = expanded,
+#     onDismissRequest = { expanded = false },
+#     modifier = Modifier.verticalScrollbar(menuScrollState),
+#     scrollState = menuScrollState,
+#     containerColor = MaterialTheme.colorScheme.surface
+# ) {
+#     options.forEach { option ->
+#         DropdownMenuItem(...)
+#     }
+# }
+
+NEW_DROPDOWN_MENU = """    ExposedDropdownMenu(
+        expanded = expanded,
+        onDismissRequest = { expanded = false },
+        modifier = Modifier.heightIn(max = 300.dp),
+        containerColor = MaterialTheme.colorScheme.surface
+    ) {
+        LazyColumn {
+            items(options) { option ->
+                DropdownMenuItem(
+                    text = { Text(option) },
+                    onClick = {
+                        onValueChange(option)
+                        expanded = false
+                        focusManager.clearFocus()
+                    }
+                )
+            }
+        }
+    }"""
+
+IMPORTS_TO_ADD = """
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 """
 
 # ----------------------------------------------------------------------
@@ -82,33 +126,34 @@ def write_file(path, content):
         f.write(content)
 
 
-def find_function_brace(content, func_name):
-    """Find the start and end positions of a function by name."""
-    pattern = r"fun\s+" + re.escape(func_name) + r"\s*\([^)]*\)\s*[:=]?\s*[^{]*\{"
-    match = re.search(pattern, content, re.MULTILINE)
-    if not match:
-        return None
-    start = match.start()
-    brace_pos = match.end() - 1  # position of '{'
-    # find matching brace
+def find_matching_brace(text, start_pos):
     depth = 0
-    end = -1
-    for i in range(brace_pos, len(content)):
-        ch = content[i]
+    for i in range(start_pos, len(text)):
+        ch = text[i]
         if ch == '{':
             depth += 1
         elif ch == '}':
             depth -= 1
             if depth == 0:
-                end = i
-                break
+                return i
+    return -1
+
+
+def find_function_brace(content, func_name):
+    """Find start and end of a function by name."""
+    pattern = r"fun\s+" + re.escape(func_name) + r"\s*\([^)]*\)\s*[:=]?\s*[^{]*\{"
+    match = re.search(pattern, content, re.MULTILINE)
+    if not match:
+        return None
+    start = match.start()
+    brace_pos = match.end() - 1
+    end = find_matching_brace(content, brace_pos)
     if end == -1:
         return None
     return start, end
 
 
 def replace_function(content, func_name, new_body):
-    """Replace the entire function definition with new_body."""
     pos = find_function_brace(content, func_name)
     if not pos:
         print(f"[ERROR] Could not find function {func_name}")
@@ -122,7 +167,7 @@ def replace_function(content, func_name, new_body):
 
 
 def patch_settings_manager(content):
-    # 1. Insert cache fields after 'object SettingsManager {'
+    # Insert cache fields after 'object SettingsManager {'
     obj_pattern = r"(object SettingsManager\s*\{)"
     obj_match = re.search(obj_pattern, content)
     if not obj_match:
@@ -136,7 +181,7 @@ def patch_settings_manager(content):
     else:
         print("[INFO] Cache fields already present")
 
-    # 2. Replace getProfileRemarks
+    # Replace getProfileRemarks
     if "getProfileRemarks" in content:
         content = replace_function(content, "getProfileRemarks", NEW_GET_PROFILE_REMARKS_BODY)
         print("[INFO] Replaced getProfileRemarks")
@@ -163,13 +208,11 @@ def patch_mmkv_manager(content):
             continue
 
         start, end = pos
-        # Check if invalidation already exists
         body = content[start:end+1]
         if "SettingsManager.invalidateProfileRemarksCache()" in body:
             print(f"[INFO] Invalidation already present in {func_name}")
             continue
 
-        # Insert the line after the opening brace
         brace_pos = content.find("{", start)
         if brace_pos == -1:
             continue
@@ -199,6 +242,56 @@ def patch_main_activity(content):
     return content
 
 
+def patch_form_fields(content):
+    # 1. Add missing imports if not already present
+    if "import androidx.compose.foundation.lazy.LazyColumn" not in content:
+        # Insert after the last import
+        import_pattern = r"(import .*\n)+"
+        import_match = re.search(import_pattern, content)
+        if import_match:
+            insert_pos = import_match.end()
+            content = content[:insert_pos] + IMPORTS_TO_ADD + "\n" + content[insert_pos:]
+            print("[INFO] Added LazyColumn imports")
+        else:
+            print("[WARNING] Could not find import block; adding at top")
+            content = IMPORTS_TO_ADD + "\n" + content
+
+    # 2. Replace the ExposedDropdownMenu block
+    # Find the line "ExposedDropdownMenu("
+    menu_start = content.find("ExposedDropdownMenu(")
+    if menu_start == -1:
+        print("[ERROR] Could not find ExposedDropdownMenu in FormFields.kt")
+        return content
+
+    # Find the matching closing brace for the menu
+    brace_pos = content.find("{", menu_start)
+    if brace_pos == -1:
+        print("[ERROR] Could not find opening brace for ExposedDropdownMenu")
+        return content
+
+    # Find the end of the menu block by matching braces
+    depth = 0
+    menu_end = -1
+    for i in range(brace_pos, len(content)):
+        ch = content[i]
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                menu_end = i
+                break
+    if menu_end == -1:
+        print("[ERROR] Could not find closing brace for ExposedDropdownMenu")
+        return content
+
+    # Replace the entire menu block
+    content = content[:menu_start] + NEW_DROPDOWN_MENU + content[menu_end+1:]
+    print("[INFO] Replaced ExposedDropdownMenu with LazyColumn version")
+
+    return content
+
+
 # ----------------------------------------------------------------------
 # Main
 
@@ -207,45 +300,54 @@ def main(project_root):
     settings_path = os.path.join(project_root, SETTINGS_FILE)
     mmkv_path = os.path.join(project_root, MMKV_FILE)
     main_path = os.path.join(project_root, MAIN_ACTIVITY_FILE)
+    form_path = os.path.join(project_root, FORM_FIELDS_FILE)
 
-    for path in [settings_path, mmkv_path, main_path]:
+    for path in [settings_path, mmkv_path, main_path, form_path]:
         if not os.path.isfile(path):
             print(f"[ERROR] File not found: {path}")
             sys.exit(1)
 
     print("[INFO] Patching SettingsManager.kt...")
-    settings_content = read_file(settings_path)
-    settings_patched = patch_settings_manager(settings_content)
-    if settings_content != settings_patched:
-        write_file(settings_path, settings_patched)
+    content = read_file(settings_path)
+    patched = patch_settings_manager(content)
+    if content != patched:
+        write_file(settings_path, patched)
         print("[INFO] SettingsManager.kt updated.")
     else:
         print("[INFO] No changes to SettingsManager.kt.")
 
     print("[INFO] Patching MmkvManager.kt...")
-    mmkv_content = read_file(mmkv_path)
-    mmkv_patched = patch_mmkv_manager(mmkv_content)
-    if mmkv_content != mmkv_patched:
-        write_file(mmkv_path, mmkv_patched)
+    content = read_file(mmkv_path)
+    patched = patch_mmkv_manager(content)
+    if content != patched:
+        write_file(mmkv_path, patched)
         print("[INFO] MmkvManager.kt updated.")
     else:
         print("[INFO] No changes to MmkvManager.kt.")
 
     print("[INFO] Patching MainActivity.kt...")
-    main_content = read_file(main_path)
-    main_patched = patch_main_activity(main_content)
-    if main_content != main_patched:
-        write_file(main_path, main_patched)
+    content = read_file(main_path)
+    patched = patch_main_activity(content)
+    if content != patched:
+        write_file(main_path, patched)
         print("[INFO] MainActivity.kt updated.")
     else:
         print("[INFO] No changes to MainActivity.kt.")
 
-    print("[DONE] All patches applied.")
-    print("Please rebuild the app and check the logcat for 'Profile remarks cache' messages.")
+    print("[INFO] Patching FormFields.kt...")
+    content = read_file(form_path)
+    patched = patch_form_fields(content)
+    if content != patched:
+        write_file(form_path, patched)
+        print("[INFO] FormFields.kt updated.")
+    else:
+        print("[INFO] No changes to FormFields.kt.")
+
+    print("[DONE] All patches applied. Rebuild and test.")
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: python fix_dropdown_slowness_v2.py <project_root>")
+        print("Usage: python fix_all_slowdowns.py <project_root>")
         sys.exit(1)
     main(sys.argv[1])
