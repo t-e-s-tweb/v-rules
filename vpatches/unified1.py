@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
 """
-Unified patcher for v2rayNG:
-- Adds CURRENT_SERVER placeholder, DNS parallel/stale preferences.
-- Adds None and [Current Server] to subscription chain dropdowns.
-- Adds DNS parallel/stale UI toggles in Settings.
-- Optimises FormDropdownField with LazyColumn.
-- Injects custom outbound handling and chain proxy support.
+Unified patcher – includes BIND‑style DNS hosts + all previous changes.
 """
 
 import re
@@ -187,7 +182,6 @@ def patch_strings():
     c = read(p)
 
     new_strings = []
-    # Needed strings
     needed = {
         "sub_setting_none": "None",
         "sub_setting_current_server": "[Current Server]",
@@ -202,7 +196,6 @@ def patch_strings():
         new_strings.append(f'    <string name="{k}">{v}</string>')
 
     if new_strings:
-        # Insert before </resources>
         m = re.search(r'(\s*)</resources>', c, re.IGNORECASE)
         if m:
             indent, pos = m.group(1), m.start()
@@ -299,7 +292,7 @@ def patch_coreconfigcontextbuilder():
 
 
 # ----------------------------------------------------------------------
-# 6. CoreConfigManager.kt – targeted changes (robust)
+# 6. CoreConfigManager.kt – full set of targeted changes + replace configureDns + buildDnsHosts
 # ----------------------------------------------------------------------
 def patch_coreconfigmanager():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
@@ -661,14 +654,167 @@ def patch_coreconfigmanager():
     else:
         print("⚠ CoreConfigManager: handleProxyChainResolvedOutbound method not found")
 
-    # 6.6 Add DNS serveStale setting in configureDns
-    if "serveStale" not in c:
-        pattern = r'(dnsBean\.enableParallelQuery = .*)'
-        if re.search(pattern, c):
-            c = re.sub(pattern, r'\1\n        if (MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_SERVE_STALE, false) == true) {\n            dnsBean.serveStale = true\n        }', c)
-            print("✓ CoreConfigManager: added serveStale to DNS config")
+    # 6.6 Replace the whole configureDns method with a version that uses dnsBean and sets serveStale
+    method_start = c.find("private fun configureDns(")
+    if method_start != -1:
+        open_brace = c.find('{', method_start)
+        if open_brace != -1:
+            brace_count = 1
+            i = open_brace + 1
+            while i < len(c) and brace_count > 0:
+                if c[i] == '{':
+                    brace_count += 1
+                elif c[i] == '}':
+                    brace_count -= 1
+                i += 1
+            if brace_count == 0:
+                new_configure_dns = '''    private fun configureDns(
+        configContext: CoreConfigContext,
+        v2rayConfig: V2rayConfig,
+        policyGroupBalancerTags: Map<String, String>,
+    ) {
+        val servers = ArrayList<Any>()
+        val remoteDns = SettingsManager.getRemoteDnsServers()
+        val domesticDns = SettingsManager.getDomesticDnsServers()
+
+        remoteDns.forEach { servers.add(it) }
+
+        val hosts = buildDnsHostsFromRoutingRules(configContext)
+        val cnDomesticDnsTags = buildDnsCnModeFromRoutingRules(configContext, servers, domesticDns)
+        val domesticDnsTags = buildDnsFromRoutingRules(
+            configContext = configContext,
+            servers = servers,
+            remoteDns = remoteDns,
+            domesticDns = domesticDns
+        )
+        domesticDnsTags.addAll(cnDomesticDnsTags)
+
+        val dnsBean = V2rayConfig.DnsBean(
+            servers = servers,
+            hosts = hosts,
+            tag = AppConfig.TAG_DNS,
+            enableParallelQuery = null // will be set by preferences
+        )
+
+        // DNS parallel query and serve stale from preferences
+        if (MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_SERVE_STALE, false) == true) {
+            dnsBean.serveStale = true
+        }
+        if (MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_PARALLEL_QUERY, false) == true) {
+            dnsBean.enableParallelQuery = true
+        }
+
+        v2rayConfig.dns = dnsBean
+
+        if (domesticDnsTags.isNotEmpty()) {
+            v2rayConfig.routing.rules.add(
+                V2rayConfig.RoutingBean.RulesBean(
+                    outboundTag = AppConfig.TAG_DIRECT,
+                    inboundTag = ArrayList(domesticDnsTags),
+                    domain = null
+                )
+            )
+        }
+
+        val dnsProxyBalancerTag = policyGroupBalancerTags[AppConfig.TAG_PROXY]
+        if (dnsProxyBalancerTag != null) {
+            v2rayConfig.routing.rules.add(
+                V2rayConfig.RoutingBean.RulesBean(
+                    balancerTag = dnsProxyBalancerTag,
+                    inboundTag = arrayListOf(AppConfig.TAG_DNS),
+                    domain = null
+                )
+            )
+        } else {
+            v2rayConfig.routing.rules.add(
+                V2rayConfig.RoutingBean.RulesBean(
+                    outboundTag = AppConfig.TAG_PROXY,
+                    inboundTag = arrayListOf(AppConfig.TAG_DNS),
+                    domain = null
+                )
+            )
+        }
+    }'''
+                method_end = i
+                c = c[:method_start] + new_configure_dns + c[method_end:]
+                print("✓ CoreConfigManager: replaced configureDns body with dnsBean version")
+            else:
+                print("⚠ CoreConfigManager: brace mismatch for configureDns")
         else:
-            print("⚠ CoreConfigManager: could not find dnsBean.enableParallelQuery assignment")
+            print("⚠ CoreConfigManager: could not find opening brace for configureDns")
+    else:
+        print("⚠ CoreConfigManager: configureDns method not found")
+
+    # 6.7 Replace buildDnsHostsFromRoutingRules with BIND‑style hosts parser
+    method_start = c.find("private fun buildDnsHostsFromRoutingRules(")
+    if method_start != -1:
+        open_brace = c.find('{', method_start)
+        if open_brace != -1:
+            brace_count = 1
+            i = open_brace + 1
+            while i < len(c) and brace_count > 0:
+                if c[i] == '{':
+                    brace_count += 1
+                elif c[i] == '}':
+                    brace_count -= 1
+                i += 1
+            if brace_count == 0:
+                new_build_hosts = '''    private fun buildDnsHostsFromRoutingRules(configContext: CoreConfigContext): MutableMap<String, Any> {
+        val hosts = mutableMapOf<String, Any>()
+
+        val blockDomains = configContext.routingDomainRules
+            .asSequence()
+            .filter { it.outboundTag == AppConfig.TAG_BLOCKED }
+            .flatMap { it.domain.asSequence() }
+            .toList()
+        if (blockDomains.isNotEmpty()) {
+            hosts.putAll(blockDomains.map { it to AppConfig.LOOPBACK })
+        }
+
+        hosts[AppConfig.GOOGLEAPIS_CN_DOMAIN] = AppConfig.GOOGLEAPIS_COM_DOMAIN
+        hosts[AppConfig.DNS_ALIDNS_DOMAIN] = AppConfig.DNS_ALIDNS_ADDRESSES
+        hosts[AppConfig.DNS_CISCO_SSE_DOMAIN] = AppConfig.DNS_CISCO_SSE_ADDRESSES
+        hosts[AppConfig.DNS_CISCO_UMBRELLA_DOMAIN] = AppConfig.DNS_CISCO_UMBRELLA_ADDRESSES
+        hosts[AppConfig.DNS_CLOUDFLARE_ONE_DOMAIN] = AppConfig.DNS_CLOUDFLARE_ONE_ADDRESSES
+        hosts[AppConfig.DNS_CLOUDFLARE_ONEDOT_DNS_DOMAIN] = AppConfig.DNS_CLOUDFLARE_ONEDOT_DNS_ADDRESSES
+        hosts[AppConfig.DNS_CLOUDFLARE_DNS_COM_DOMAIN] = AppConfig.DNS_CLOUDFLARE_DNS_COM_ADDRESSES
+        hosts[AppConfig.DNS_CLOUDFLARE_DNS_DOMAIN] = AppConfig.DNS_CLOUDFLARE_DNS_ADDRESSES
+        hosts[AppConfig.DNS_CLOUDFLARE_WARP_DOMAIN] = AppConfig.DNS_CLOUDFLARE_WARP_ADDRESSES
+        hosts[AppConfig.DNS_DNSPOD_DOH_DOMAIN] = AppConfig.DNS_DNSPOD_DOH_ADDRESSES
+        hosts[AppConfig.DNS_DNSPOD_DOT_DOMAIN] = AppConfig.DNS_DNSPOD_DOT_ADDRESSES
+        hosts[AppConfig.DNS_GOOGLE_DOMAIN] = AppConfig.DNS_GOOGLE_ADDRESSES
+        hosts[AppConfig.DNS_QUAD9_DOMAIN] = AppConfig.DNS_QUAD9_ADDRESSES
+        hosts[AppConfig.DNS_SB_DOMAIN] = AppConfig.DNS_SB_ADDRESSES
+        hosts[AppConfig.DNS_YANDEX_DOMAIN] = AppConfig.DNS_YANDEX_ADDRESSES
+
+        // User DNS hosts – BIND‑style format (one line per domain, space‑separated addresses)
+        val userHosts = MmkvManager.decodeSettingsString(AppConfig.PREF_DNS_HOSTS)
+        if (userHosts.isNotNullEmpty()) {
+            val userHostsMap = userHosts?.lines()
+                ?.filter { it.isNotEmpty() }
+                ?.filter { it.contains(" ") }
+                ?.associate { line ->
+                    val parts = line.trim().split("\\s+".toRegex())
+                    val key = parts[0]
+                    val values = parts.drop(1)
+                    key to if (values.size == 1) values[0] else values
+                }
+            if (userHostsMap != null) {
+                hosts.putAll(userHostsMap)
+            }
+        }
+
+        return hosts
+    }'''
+                method_end = i
+                c = c[:method_start] + new_build_hosts + c[method_end:]
+                print("✓ CoreConfigManager: replaced buildDnsHostsFromRoutingRules with BIND‑style parser")
+            else:
+                print("⚠ CoreConfigManager: brace mismatch for buildDnsHostsFromRoutingRules")
+        else:
+            print("⚠ CoreConfigManager: could not find opening brace for buildDnsHostsFromRoutingRules")
+    else:
+        print("⚠ CoreConfigManager: buildDnsHostsFromRoutingRules method not found")
 
     write(p, c)
     print("✓ CoreConfigManager: targeted patches applied")
@@ -785,7 +931,7 @@ def patch_formfields():
 # ----------------------------------------------------------------------
 def main():
     print("=" * 70)
-    print("Unified Patcher – all targeted changes")
+    print("Unified Patcher – all changes (with BIND‑style hosts)")
     print("=" * 70)
 
     try:
