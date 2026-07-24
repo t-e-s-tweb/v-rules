@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 v2rayNG – Replace FormDropdownField with working searchable lazy dropdown (Popup + LazyColumn)
-- Clickable on text field toggles dropdown
-- Popup positioned below text field with offset
-- Search box filters options
-- LazyColumn for virtualization
+- Clickable on Box toggles dropdown
+- Popup positioned correctly
+- Search box with auto-focus
 """
 
 import os
@@ -30,13 +29,26 @@ fun FormDropdownField(
     var searchQuery by rememberSaveable { mutableStateOf("") }
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
+    val focusRequester = remember { FocusRequester() }
 
     val filteredOptions = remember(options, searchQuery) {
         if (searchQuery.isEmpty()) options
         else options.filter { it.contains(searchQuery, ignoreCase = true) }
     }
 
-    Box(modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .clickable(enabled = enabled && !editable) {
+                expanded = true
+                keyboardController?.hide()
+                // Focus the search field when popup opens (delayed)
+                if (expanded) {
+                    // We'll use LaunchedEffect to focus after composition
+                }
+            }
+    ) {
         OutlinedTextField(
             value = value,
             onValueChange = { if (editable) onValueChange(it) },
@@ -61,17 +73,20 @@ fun FormDropdownField(
                         keyboardController?.hide()
                     }
                 }
-                .clickable(enabled = enabled && !editable) {
-                    expanded = true
-                    keyboardController?.hide()
-                }
         )
 
         if (expanded) {
+            // Auto-focus search field when popup appears
+            LaunchedEffect(Unit) {
+                focusRequester.requestFocus()
+            }
             Popup(
-                onDismissRequest = { expanded = false },
+                onDismissRequest = {
+                    expanded = false
+                    searchQuery = ""
+                },
                 alignment = Alignment.TopStart,
-                offset = IntOffset(0, 56) // approx height of OutlinedTextField
+                offset = IntOffset(0, 56)
             ) {
                 Surface(
                     modifier = Modifier
@@ -89,7 +104,8 @@ fun FormDropdownField(
                             singleLine = true,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(8.dp),
+                                .padding(8.dp)
+                                .focusRequester(focusRequester),
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedContainerColor = Color.Transparent,
                                 unfocusedContainerColor = Color.Transparent,
@@ -141,12 +157,15 @@ REQUIRED_IMPORTS = [
     "import androidx.compose.foundation.clickable",
     "import androidx.compose.material3.Divider",
     "import androidx.compose.material3.Surface",
+    "import androidx.compose.runtime.LaunchedEffect",
     "import androidx.compose.runtime.mutableStateOf",
     "import androidx.compose.runtime.remember",
     "import androidx.compose.runtime.saveable.rememberSaveable",
     "import androidx.compose.runtime.setValue",
     "import androidx.compose.runtime.getValue",
     "import androidx.compose.ui.Alignment",
+    "import androidx.compose.ui.focus.FocusRequester",
+    "import androidx.compose.ui.focus.focusRequester",
     "import androidx.compose.ui.unit.IntOffset",
     "import androidx.compose.ui.unit.dp",
     "import androidx.compose.ui.window.Popup",
@@ -232,6 +251,6 @@ def main(project_root):
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: python fix_dropdown_working.py <project_root>")
+        print("Usage: python fix_dropdown_working_v2.py <project_root>")
         sys.exit(1)
     main(sys.argv[1])
