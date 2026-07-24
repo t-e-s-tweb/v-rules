@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-v2rayNG – Replace FormDropdownField with searchable lazy dropdown (Popup + LazyColumn)
-Fixed imports: removed bogus 'weight' import, added 'remember'.
+v2rayNG – Fixed searchable lazy dropdown (Popup + LazyColumn)
 """
 
 import os
@@ -33,14 +32,18 @@ fun FormDropdownField(
         else options.filter { it.contains(searchQuery, ignoreCase = true) }
     }
 
-    Box(modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+    ) {
         OutlinedTextField(
             value = value,
             onValueChange = { if (editable) onValueChange(it) },
             readOnly = !editable,
             enabled = enabled,
             label = { Text(label) },
-            placeholder = { if (placeholder != null) Text(placeholder) },
+            placeholder = placeholder?.let { { Text(it) } },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
             colors = OutlinedTextFieldDefaults.colors(
                 focusedContainerColor = Color.Transparent,
@@ -91,11 +94,6 @@ fun FormDropdownField(
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedContainerColor = Color.Transparent,
                                 unfocusedContainerColor = Color.Transparent,
-                                cursorColor = MaterialTheme.colorScheme.secondary,
-                                selectionColors = TextSelectionColors(
-                                    handleColor = MaterialTheme.colorScheme.secondary,
-                                    backgroundColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.4f)
-                                )
                             )
                         )
                         Divider()
@@ -113,9 +111,9 @@ fun FormDropdownField(
                             }
                             if (filteredOptions.isEmpty()) {
                                 item {
-                                    DropdownMenuItem(
-                                        text = { Text("No results") },
-                                        onClick = { }
+                                    Text(
+                                        text = "No results",
+                                        modifier = Modifier.padding(16.dp)
                                     )
                                 }
                             }
@@ -128,26 +126,19 @@ fun FormDropdownField(
 }
 """
 
-# Correct imports – removed `import androidx.compose.foundation.layout.weight`
 REQUIRED_IMPORTS = [
     "import androidx.compose.foundation.layout.Box",
     "import androidx.compose.foundation.layout.Column",
     "import androidx.compose.foundation.layout.fillMaxWidth",
-    "import androidx.compose.foundation.layout.padding",
     "import androidx.compose.foundation.layout.heightIn",
+    "import androidx.compose.foundation.layout.padding",
     "import androidx.compose.foundation.lazy.LazyColumn",
     "import androidx.compose.foundation.lazy.items",
     "import androidx.compose.foundation.clickable",
     "import androidx.compose.material3.Divider",
-    "import androidx.compose.material3.Popup",
     "import androidx.compose.material3.Surface",
-    "import androidx.compose.runtime.mutableStateOf",
-    "import androidx.compose.runtime.remember",
-    "import androidx.compose.runtime.saveable.rememberSaveable",
-    "import androidx.compose.runtime.setValue",
-    "import androidx.compose.runtime.getValue",
     "import androidx.compose.ui.Alignment",
-    "import androidx.compose.ui.unit.dp",
+    "import androidx.compose.ui.window.Popup",
 ]
 
 
@@ -171,17 +162,14 @@ def find_function_brace(content, func_name):
     depth = 0
     end = -1
     for i in range(brace_pos, len(content)):
-        ch = content[i]
-        if ch == '{':
+        if content[i] == '{':
             depth += 1
-        elif ch == '}':
+        elif content[i] == '}':
             depth -= 1
             if depth == 0:
                 end = i
                 break
-    if end == -1:
-        return None
-    return start, end
+    return (start, end) if end != -1 else None
 
 
 def replace_function(content, func_name, new_body):
@@ -190,7 +178,7 @@ def replace_function(content, func_name, new_body):
         print(f"[ERROR] Could not find function {func_name}")
         return content
     start, end = pos
-    return content[:start] + new_body + content[end+1:]
+    return content[:start] + new_body + content[end + 1:]
 
 
 def main(project_root):
@@ -202,32 +190,28 @@ def main(project_root):
     content = read_file(form_path)
 
     # Add missing imports
-    import_block = ""
-    for imp in REQUIRED_IMPORTS:
-        if imp not in content:
-            import_block += imp + "\n"
-
+    import_block = "\n".join(imp for imp in REQUIRED_IMPORTS if imp not in content)
     if import_block:
-        import_pattern = r"(import .*\n)+"
-        import_match = re.search(import_pattern, content)
+        import_pattern = r"(^import .*\n)+"
+        import_match = re.search(import_pattern, content, re.MULTILINE)
         if import_match:
             insert_pos = import_match.end()
-            content = content[:insert_pos] + import_block + content[insert_pos:]
+            content = content[:insert_pos] + import_block + "\n" + content[insert_pos:]
             print("[INFO] Added required imports")
         else:
-            print("[WARNING] Could not find import block; adding at top")
-            content = import_block + content
+            content = import_block + "\n\n" + content
+            print("[INFO] Added imports at top")
 
-    # Replace the function
+    # Replace function
     content = replace_function(content, "FormDropdownField", NEW_FUNCTION)
-    print("[INFO] Replaced FormDropdownField with lazy searchable version")
+    print("[INFO] Replaced FormDropdownField with fixed searchable version")
 
     write_file(form_path, content)
-    print("[DONE] FormFields.kt patched.")
+    print("[DONE] FormFields.kt successfully patched!")
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: python fix_dropdown_lazy_final.py <project_root>")
+        print("Usage: python fix_dropdown_lazy.py <project_root>")
         sys.exit(1)
     main(sys.argv[1])
