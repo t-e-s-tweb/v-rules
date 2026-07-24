@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-v2rayNG – Replace FormDropdownField with searchable lazy dropdown (Popup + LazyColumn)
-Correct imports and removes duplicate annotations.
+v2rayNG – Replace FormDropdownField with working searchable lazy dropdown (Popup + LazyColumn)
+- Clickable on text field toggles dropdown
+- Popup positioned below text field with offset
+- Search box filters options
+- LazyColumn for virtualization
 """
 
 import os
@@ -10,7 +13,7 @@ import sys
 
 FORM_FIELDS_FILE = "V2rayNG/app/src/main/java/com/v2ray/ang/compose/FormFields.kt"
 
-NEW_FUNCTION_WITH_ANNOTATION = """
+NEW_FUNCTION = """
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FormDropdownField(
@@ -58,18 +61,17 @@ fun FormDropdownField(
                         keyboardController?.hide()
                     }
                 }
-                .clickable(enabled = enabled) {
-                    if (!editable) {
-                        expanded = true
-                        keyboardController?.hide()
-                    }
+                .clickable(enabled = enabled && !editable) {
+                    expanded = true
+                    keyboardController?.hide()
                 }
         )
 
         if (expanded) {
             Popup(
                 onDismissRequest = { expanded = false },
-                alignment = Alignment.TopStart
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, 56) // approx height of OutlinedTextField
             ) {
                 Surface(
                     modifier = Modifier
@@ -128,7 +130,6 @@ fun FormDropdownField(
 }
 """
 
-# Correct imports – including androidx.compose.ui.window.Popup
 REQUIRED_IMPORTS = [
     "import androidx.compose.foundation.layout.Box",
     "import androidx.compose.foundation.layout.Column",
@@ -146,6 +147,7 @@ REQUIRED_IMPORTS = [
     "import androidx.compose.runtime.setValue",
     "import androidx.compose.runtime.getValue",
     "import androidx.compose.ui.Alignment",
+    "import androidx.compose.ui.unit.IntOffset",
     "import androidx.compose.ui.unit.dp",
     "import androidx.compose.ui.window.Popup",
 ]
@@ -162,22 +164,14 @@ def write_file(path, content):
 
 
 def find_function_with_annotation(content, func_name):
-    """
-    Find the start of the function including any preceding annotations.
-    We'll look for @OptIn and @Composable before the fun.
-    """
-    # Find the line where the function starts: "fun FormDropdownField"
     pattern = r"(@OptIn\([^)]*\)\s*\n)?(@Composable\s*\n)?fun\s+" + re.escape(func_name) + r"\s*\("
     match = re.search(pattern, content, re.MULTILINE)
     if not match:
         return None
     start = match.start()
-    # Now find the opening brace after the signature
-    # We'll search from match.end() for the first '{'
     brace_pos = content.find("{", match.end())
     if brace_pos == -1:
         return None
-    # Find matching closing brace
     depth = 0
     end = -1
     for i in range(brace_pos, len(content)):
@@ -229,8 +223,8 @@ def main(project_root):
             content = import_block + content
 
     # Replace the function
-    content = replace_function_with_annotation(content, "FormDropdownField", NEW_FUNCTION_WITH_ANNOTATION)
-    print("[INFO] Replaced FormDropdownField with lazy searchable version")
+    content = replace_function_with_annotation(content, "FormDropdownField", NEW_FUNCTION)
+    print("[INFO] Replaced FormDropdownField with working lazy searchable version")
 
     write_file(form_path, content)
     print("[DONE] FormFields.kt patched.")
@@ -238,6 +232,6 @@ def main(project_root):
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: python fix_dropdown_final_complete.py <project_root>")
+        print("Usage: python fix_dropdown_working.py <project_root>")
         sys.exit(1)
     main(sys.argv[1])
