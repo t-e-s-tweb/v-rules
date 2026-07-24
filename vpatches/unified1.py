@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Final unified patcher – fixes dropdown crash and DNS parallel/stale toggling.
+Final corrected unified patcher – fixes regex escape sequence error.
 """
 
 import re
@@ -745,7 +745,7 @@ def patch_coreconfigmanager():
     else:
         print("⚠ CoreConfigManager: configureDns method not found")
 
-    # 6.7 Replace buildDnsHostsFromRoutingRules with BIND‑style hosts parser
+    # 6.7 Replace buildDnsHostsFromRoutingRules with BIND‑style hosts parser (using raw regex)
     method_start = c.find("private fun buildDnsHostsFromRoutingRules(")
     if method_start != -1:
         open_brace = c.find('{', method_start)
@@ -794,7 +794,7 @@ def patch_coreconfigmanager():
                 ?.filter { it.isNotEmpty() }
                 ?.filter { it.contains(" ") }
                 ?.associate { line ->
-                    val parts = line.trim().split("\\s+".toRegex())
+                    val parts = line.trim().split(Regex("""\s+"""))
                     val key = parts[0]
                     val values = parts.drop(1)
                     key to if (values.size == 1) values[0] else values
@@ -808,7 +808,7 @@ def patch_coreconfigmanager():
     }'''
                 method_end = i
                 c = c[:method_start] + new_build_hosts + c[method_end:]
-                print("✓ CoreConfigManager: replaced buildDnsHostsFromRoutingRules with BIND‑style parser")
+                print("✓ CoreConfigManager: replaced buildDnsHostsFromRoutingRules with BIND‑style parser (raw regex)")
             else:
                 print("⚠ CoreConfigManager: brace mismatch for buildDnsHostsFromRoutingRules")
         else:
@@ -874,7 +874,6 @@ def patch_formfields():
             print("✓ FormFields: added import for heightIn")
 
     # Modify the ExposedDropdownMenu modifier to include heightIn(max = 300.dp)
-    # We'll replace the entire block to ensure consistency.
     old_menu = '''        ExposedDropdownMenu(
             expanded = expanded,
             onDismissRequest = { expanded = false },
@@ -927,7 +926,7 @@ def patch_formfields():
 # ----------------------------------------------------------------------
 def main():
     print("=" * 70)
-    print("Final Unified Patcher – all fixes included")
+    print("Final Corrected Unified Patcher – regex fixed")
     print("=" * 70)
 
     try:
