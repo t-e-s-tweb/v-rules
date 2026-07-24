@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fixed patcher – applies targeted changes only.
+Corrected patcher – applies targeted changes without corrupting the file.
 """
 
 import re
@@ -30,7 +30,6 @@ def patch_appconfig():
     c = read(p)
 
     if '"__CURRENT_SERVER__"' not in c:
-        # insert after BUILTIN_OUTBOUND_TAGS
         marker = "    val BUILTIN_OUTBOUND_TAGS = setOf("
         if marker in c:
             insert_pos = c.find(marker) + len(marker)
@@ -119,25 +118,27 @@ def patch_subedit():
     else:
         print("⚠ SubEditActivity: profileSuggestions line not found")
 
-    # Convert saved values to display strings when loading
+    # Convert saved values to display strings when loading (fix type mismatch: ensure String)
     old_load_prev = "var prevProfile by rememberSaveable { mutableStateOf(initial.prevProfile ?: \"\") }"
     new_load_prev = '''    var prevProfile by rememberSaveable { mutableStateOf(
         when (initial.prevProfile) {
             "" -> "None"
             AppConfig.CURRENT_SERVER -> "[Current Server]"
-            else -> initial.prevProfile
+            else -> initial.prevProfile ?: ""
         }
     ) }'''
     if "var prevProfile by rememberSaveable" in c:
         c = c.replace(old_load_prev, new_load_prev, 1)
         print("✓ SubEditActivity: updated prevProfile loading")
+    else:
+        print("⚠ SubEditActivity: prevProfile loading not found")
 
     old_load_next = "var nextProfile by rememberSaveable { mutableStateOf(initial.nextProfile ?: \"\") }"
     new_load_next = '''    var nextProfile by rememberSaveable { mutableStateOf(
         when (initial.nextProfile) {
             "" -> "None"
             AppConfig.CURRENT_SERVER -> "[Current Server]"
-            else -> initial.nextProfile
+            else -> initial.nextProfile ?: ""
         }
     ) }'''
     if "var nextProfile by rememberSaveable" in c:
@@ -202,7 +203,6 @@ def patch_coreconfigcontextbuilder():
     c = read(p)
 
     if "private fun resolveCurrentServer" not in c:
-        # Insert before the last '}'
         lines = c.splitlines()
         for i in range(len(lines) - 1, -1, -1):
             if lines[i].strip() == '}':
@@ -227,7 +227,6 @@ def patch_coreconfigcontextbuilder():
                 print("✓ CoreConfigContextBuilder: added resolveCurrentServer")
                 break
 
-    # Update resolveProxyChainProfilesFromGroup to use resolveCurrentServer
     old_chain = '''    private fun resolveProxyChainProfilesFromGroup(config: ProfileItem): List<ProfileItem> {
         if (config.subscriptionId.isEmpty()) {
             return listOf(config)
@@ -276,9 +275,9 @@ def patch_coreconfigcontextbuilder():
 
 
 # ----------------------------------------------------------------------
-# 6. CoreConfigManager.kt – targeted changes only
+# 6. CoreConfigManager.kt – targeted changes (robust)
 # ----------------------------------------------------------------------
-def patch_coreconfigmanager_targeted():
+def patch_coreconfigmanager():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
     if not p.exists():
         print("✗ CoreConfigManager.kt not found – skipping")
@@ -286,17 +285,18 @@ def patch_coreconfigmanager_targeted():
     backup_kotlin(p)
     c = read(p)
 
-    # 6.1 Add missing imports if needed
+    # 6.1 Add missing import
     if "import com.v2ray.ang.dto.entities.SubscriptionItem" not in c:
-        # insert after last import
-        import_line = "import com.v2ray.ang.dto.entities.SubscriptionItem"
+        # Insert after the last import
         last_import = re.search(r'^import .*$', c, re.MULTILINE)
         if last_import:
             pos = last_import.end()
-            c = c[:pos] + "\n" + import_line + c[pos:]
+            c = c[:pos] + "\nimport com.v2ray.ang.dto.entities.SubscriptionItem" + c[pos:]
             print("✓ CoreConfigManager: added import SubscriptionItem")
+        else:
+            print("⚠ CoreConfigManager: could not find import block")
 
-    # 6.2 Add helper functions at the end of the file (before the last '}')
+    # 6.2 Add helper functions before the final '}'
     helpers = r'''
     // ------------------------------------------------------------------
     // Custom outbound injection with chain proxy support
@@ -462,7 +462,7 @@ def patch_coreconfigmanager_targeted():
     }
 '''
     if "private fun getCurrentMainServerRemarks()" not in c:
-        # insert before last '}'
+        # Insert before last '}'
         lines = c.splitlines()
         for i in range(len(lines)-1, -1, -1):
             if lines[i].strip() == '}':
@@ -472,72 +472,98 @@ def patch_coreconfigmanager_targeted():
                 break
 
     # 6.3 Modify buildUnifiedConfig to call injectCustomOutbounds
-    # Find the line where it calls applyObservability, applySpeedDisabled, etc.
-    # We'll add injectCustomOutbounds after the balancer loop and before configureRouting.
-    # Look for "configureRouting(" and insert before it.
     if "injectCustomOutbounds(v2rayConfig)" not in c:
-        # Insert before configureRouting call
         pattern = r'(\s+)configureRouting\(configContext, v2rayConfig, policyGroupBalancerTags\)'
         replacement = r'\1injectCustomOutbounds(v2rayConfig)\n\1configureRouting(configContext, v2rayConfig, policyGroupBalancerTags)'
         c = re.sub(pattern, replacement, c, count=1)
         print("✓ CoreConfigManager: added injectCustomOutbounds call")
 
-    # 6.4 Modify handleProxyChainResolvedOutbound to use the new logic.
-    # We'll replace the entire method with a new version that uses the chain helpers.
-    old_method = r'''    private fun handleProxyChainResolvedOutbound(
+    # 6.4 Update buildOutbounds signature and call
+    # Add outboundTagMap parameter to buildOutbounds
+    old_build_outbounds = '''    private fun buildOutbounds(
         resolvedOutbound: CoreConfigContext.ResolvedOutbound,
         prepend: Boolean,
         existingTags: MutableSet<String>,
         v2rayConfig: V2rayConfig,
+        policyGroupBalancerTags: MutableMap<String, String>,
+        balancerStrategies: MutableList<BalancerStrategy>,
     )'''
-    # We need to find the whole method body and replace it.
-    # We'll use regex to find from that line to the closing brace of the method.
-    # But simpler: we can add a new method and comment out the old one? Not ideal.
-    # Instead, we'll replace the entire method with a new version that calls the new helpers.
-    # We'll locate the start and then scan for the matching closing brace.
-    # Since this is complex, we'll just note that we need to update it.
-    # For now, we'll insert a note, but we can also use a more robust approach.
+    new_build_outbounds = '''    private fun buildOutbounds(
+        resolvedOutbound: CoreConfigContext.ResolvedOutbound,
+        prepend: Boolean,
+        existingTags: MutableSet<String>,
+        v2rayConfig: V2rayConfig,
+        policyGroupBalancerTags: MutableMap<String, String>,
+        balancerStrategies: MutableList<BalancerStrategy>,
+        outboundTagMap: MutableMap<String, String> = mutableMapOf(),
+    )'''
+    if old_build_outbounds in c:
+        c = c.replace(old_build_outbounds, new_build_outbounds, 1)
+        print("✓ CoreConfigManager: updated buildOutbounds signature")
+    else:
+        print("⚠ CoreConfigManager: buildOutbounds signature not found")
 
-    # I'll implement a scanner to replace the method body.
-    start_pattern = r'    private fun handleProxyChainResolvedOutbound\([^)]*\) \{[^}]*\}'
-    # This won't match nested braces; we need a proper scanner.
+    # Update call to handleProxyChainResolvedOutbound inside buildOutbounds
+    old_call = '''            CoreResolvedType.PROXYCHAIN -> handleProxyChainResolvedOutbound(
+                resolvedOutbound = resolvedOutbound,
+                prepend = prepend,
+                existingTags = existingTags,
+                v2rayConfig = v2rayConfig,
+            )'''
+    new_call = '''            CoreResolvedType.PROXYCHAIN -> handleProxyChainResolvedOutbound(
+                resolvedOutbound = resolvedOutbound,
+                prepend = prepend,
+                existingTags = existingTags,
+                v2rayConfig = v2rayConfig,
+                outboundTagMap = outboundTagMap,
+            )'''
+    if old_call in c:
+        c = c.replace(old_call, new_call, 1)
+        print("✓ CoreConfigManager: updated handleProxyChainResolvedOutbound call")
+    else:
+        print("⚠ CoreConfigManager: call not found")
 
-    # Instead, we'll use a simpler approach: append a new version of the method and rename the old one?
-    # Better: we'll replace the old method with a new one that calls the chain logic from the helpers.
-    # We'll locate the method start, then find the matching brace using a counter.
-    # I'll implement a helper to find method body.
-
-    def find_method_body(text, start_line):
-        lines = text.splitlines()
-        brace_count = 0
-        start_idx = None
-        for i in range(start_line, len(lines)):
-            line = lines[i]
-            if '{' in line:
-                if brace_count == 0:
-                    start_idx = i
-                brace_count += line.count('{')
-            if '}' in line:
-                brace_count -= line.count('}')
-                if brace_count == 0 and start_idx is not None:
-                    return start_idx, i
-        return None, None
-
-    # We'll locate the method starting line.
+    # 6.5 Replace handleProxyChainResolvedOutbound body with new version
+    # Find the method start and extract its body using brace counting
     method_start = c.find("private fun handleProxyChainResolvedOutbound")
-    if method_start != -1:
-        # find line number
-        start_line = c[:method_start].count('\n')
-        start, end = find_method_body(c, start_line)
-        if start is not None:
-            # Replace the method body with new version.
-            new_method = '''    private fun handleProxyChainResolvedOutbound(
+    if method_start == -1:
+        print("⚠ CoreConfigManager: handleProxyChainResolvedOutbound method not found")
+    else:
+        # Find the opening brace
+        open_brace = c.find('{', method_start)
+        if open_brace == -1:
+            print("⚠ CoreConfigManager: could not find opening brace for handleProxyChainResolvedOutbound")
+        else:
+            # Count braces to find matching closing brace
+            brace_count = 1
+            i = open_brace + 1
+            while i < len(c) and brace_count > 0:
+                if c[i] == '{':
+                    brace_count += 1
+                elif c[i] == '}':
+                    brace_count -= 1
+                i += 1
+            if brace_count != 0:
+                print("⚠ CoreConfigManager: brace mismatch for handleProxyChainResolvedOutbound")
+            else:
+                # Replace the method body (from open_brace to i) with new body
+                # We keep the signature as is, but we need to add the new parameter.
+                # We already added outboundTagMap to the signature in the previous step.
+                # However, the signature in the file may not have the new parameter yet.
+                # We'll add it here as well.
+                new_signature = '''private fun handleProxyChainResolvedOutbound(
         resolvedOutbound: CoreConfigContext.ResolvedOutbound,
         prepend: Boolean,
         existingTags: MutableSet<String>,
         v2rayConfig: V2rayConfig,
         outboundTagMap: MutableMap<String, String>,
-    ) {
+    )'''
+                # Find the existing signature line and replace it
+                sig_start = c.rfind('\n', 0, method_start) + 1
+                sig_end = c.find('{', method_start)
+                old_sig = c[sig_start:sig_end].strip()
+                # Replace the whole signature+body
+                new_body = ''' {
         LogUtil.d(AppConfig.TAG, "🔗 Processing PROXYCHAIN for tag='${resolvedOutbound.tag}', prepend=$prepend")
         LogUtil.d(AppConfig.TAG, "   Number of resolvedProfiles: ${resolvedOutbound.resolvedProfiles.size}")
 
@@ -624,33 +650,22 @@ def patch_coreconfigmanager_targeted():
             }
         }
     }'''
-            # Replace the lines from start to end with new_method
-            lines = c.splitlines()
-            lines[start:end+1] = new_method.splitlines()
-            c = '\n'.join(lines)
-            print("✓ CoreConfigManager: updated handleProxyChainResolvedOutbound")
+                # Replace the old signature+body with new_signature+new_body
+                # We'll locate the method start and end
+                method_end = i
+                c = c[:method_start] + new_signature + new_body + c[method_end:]
+                print("✓ CoreConfigManager: replaced handleProxyChainResolvedOutbound body")
 
-    # 6.5 Modify configureDns to use DNS parallel/stale prefs
-    # Find the part where DnsBean is constructed and add the settings.
-    # We'll replace the dnsBean creation.
-    old_dns_bean = r'val dnsBean = V2rayConfig\.DnsBean\([^)]*\)'
-    # We'll use a more precise replacement.
-    # Instead, we'll find the line that sets enableParallelQuery and add serveStale.
+    # 6.6 Add DNS serveStale setting in configureDns
     if "serveStale" not in c:
-        # Find where dnsBean is assigned.
-        # We'll look for "v2rayConfig.dns = dnsBean" and add code before that.
-        # But simpler: we can modify the part where enableParallelQuery is set.
+        # Find where dnsBean is assigned and add serveStale
         pattern = r'(dnsBean\.enableParallelQuery = .*)'
-        replacement = r'\1\n        if (MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_SERVE_STALE, false) == true) {\n            dnsBean.serveStale = true\n        }'
         if re.search(pattern, c):
-            c = re.sub(pattern, replacement, c)
+            c = re.sub(pattern, r'\1\n        if (MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_SERVE_STALE, false) == true) {\n            dnsBean.serveStale = true\n        }', c)
             print("✓ CoreConfigManager: added serveStale to DNS config")
         else:
-            # If not found, we can add after enableParallelQuery assignment.
-            # We'll just append at the end of configureDns.
-            pass
+            print("⚠ CoreConfigManager: could not find dnsBean.enableParallelQuery assignment")
 
-    # Write changes
     write(p, c)
     print("✓ CoreConfigManager: targeted patches applied")
 
@@ -660,7 +675,7 @@ def patch_coreconfigmanager_targeted():
 # ----------------------------------------------------------------------
 def main():
     print("=" * 70)
-    print("Fixed Patcher – targeted changes only")
+    print("Corrected Patcher – targeted changes only")
     print("=" * 70)
 
     try:
@@ -669,7 +684,7 @@ def main():
         patch_subedit()
         patch_strings()
         patch_coreconfigcontextbuilder()
-        patch_coreconfigmanager_targeted()
+        patch_coreconfigmanager()
         print("\n✅ All patches applied successfully.")
         print("👉 Rebuild and test.")
     except Exception as e:
