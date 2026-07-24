@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-v2rayNG Dropdown Slowness Fix – Searchable Dropdown
+v2rayNG Dropdown Slowness Fix – Working Version
 
 - Caches getProfileRemarks() with versioning
 - Invalidates cache on server list changes
 - Pre-warms cache on app startup
-- Replaces FormDropdownField with a searchable lazy dropdown
+- Adds search + LazyColumn inside ExposedDropdownMenu (valid ColumnScope)
 """
 
 import os
@@ -68,140 +68,74 @@ PREWARM_CODE = """        // Pre-warm profile remarks cache for fast dropdowns
 """
 
 # ----------------------------------------------------------------------
-# New searchable dropdown implementation for FormFields.kt
-NEW_FORM_DROPDOWN_FIELD = """
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun FormDropdownField(
-    label: String,
-    value: String,
-    options: List<String>,
-    onValueChange: (String) -> Unit,
-    modifier: Modifier = Modifier,
-    editable: Boolean = false,
-    enabled: Boolean = true,
-    placeholder: String? = null,
-) {
-    var expanded by rememberSaveable { mutableStateOf(false) }
-    var searchQuery by rememberSaveable { mutableStateOf("") }
-    val focusManager = LocalFocusManager.current
-    val keyboardController = LocalSoftwareKeyboardController.current
-
-    val filteredOptions = remember(options, searchQuery) {
-        if (searchQuery.isEmpty()) {
-            options
-        } else {
-            options.filter { it.contains(searchQuery, ignoreCase = true) }
-        }
-    }
-
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 4.dp)
+# Correct ExposedDropdownMenu block with search + LazyColumn
+NEW_DROPDOWN_BLOCK = """    ExposedDropdownMenu(
+        expanded = expanded,
+        onDismissRequest = { expanded = false },
+        modifier = Modifier.heightIn(max = 300.dp),
+        scrollState = menuScrollState,
+        containerColor = MaterialTheme.colorScheme.surface
     ) {
-        OutlinedTextField(
-            value = value,
-            onValueChange = { if (editable) onValueChange(it) },
-            readOnly = !editable,
-            enabled = enabled,
-            label = { Text(label) },
-            placeholder = { if (placeholder != null) Text(placeholder) },
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedContainerColor = Color.Transparent,
-                unfocusedContainerColor = Color.Transparent,
-                cursorColor = MaterialTheme.colorScheme.secondary,
-                selectionColors = TextSelectionColors(
-                    handleColor = MaterialTheme.colorScheme.secondary,
-                    backgroundColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.4f)
+        var searchQuery by rememberSaveable { mutableStateOf("") }
+        val filteredOptions = remember(options, searchQuery) {
+            if (searchQuery.isEmpty()) options else options.filter { it.contains(searchQuery, ignoreCase = true) }
+        }
+        Column {
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                placeholder = { Text("Search...") },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = Color.Transparent,
+                    unfocusedContainerColor = Color.Transparent,
+                    cursorColor = MaterialTheme.colorScheme.secondary,
+                    selectionColors = TextSelectionColors(
+                        handleColor = MaterialTheme.colorScheme.secondary,
+                        backgroundColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.4f)
+                    )
                 )
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .onFocusChanged { focusState ->
-                    if (!editable && focusState.isFocused) {
-                        keyboardController?.hide()
-                    }
-                }
-                .clickable(enabled = enabled) {
-                    if (!editable) {
-                        expanded = true
-                        keyboardController?.hide()
-                    }
-                }
-        )
-
-        if (expanded) {
-            Popup(
-                onDismissRequest = { expanded = false },
-                alignment = Alignment.TopStart
-            ) {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 300.dp),
-                    shape = MaterialTheme.shapes.extraSmall,
-                    tonalElevation = 4.dp,
-                    color = MaterialTheme.colorScheme.surface
-                ) {
-                    Column {
-                        // Search box
-                        OutlinedTextField(
-                            value = searchQuery,
-                            onValueChange = { searchQuery = it },
-                            placeholder = { Text("Search...") },
-                            singleLine = true,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(8.dp),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedContainerColor = Color.Transparent,
-                                unfocusedContainerColor = Color.Transparent,
-                                cursorColor = MaterialTheme.colorScheme.secondary,
-                                selectionColors = TextSelectionColors(
-                                    handleColor = MaterialTheme.colorScheme.secondary,
-                                    backgroundColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.4f)
-                                )
-                            )
-                        )
-                        Divider()
-                        LazyColumn {
-                            items(filteredOptions) { option ->
-                                DropdownMenuItem(
-                                    text = { Text(option) },
-                                    onClick = {
-                                        onValueChange(option)
-                                        expanded = false
-                                        searchQuery = ""
-                                        focusManager.clearFocus()
-                                    }
-                                )
-                            }
-                            if (filteredOptions.isEmpty()) {
-                                item {
-                                    DropdownMenuItem(
-                                        text = { Text("No results") },
-                                        onClick = {}
-                                    )
-                                }
-                            }
+            )
+            Divider()
+            LazyColumn(modifier = Modifier.weight(1f)) {
+                items(filteredOptions) { option ->
+                    DropdownMenuItem(
+                        text = { Text(option) },
+                        onClick = {
+                            onValueChange(option)
+                            expanded = false
+                            searchQuery = ""
+                            focusManager.clearFocus()
                         }
+                    )
+                }
+                if (filteredOptions.isEmpty()) {
+                    item {
+                        DropdownMenuItem(
+                            text = { Text("No results") },
+                            onClick = { }
+                        )
                     }
                 }
             }
         }
-    }
-}
-"""
+    }"""
 
+# Correct imports – note the saveable import
 REQUIRED_IMPORTS = [
+    "import androidx.compose.foundation.layout.Column",
     "import androidx.compose.foundation.layout.heightIn",
+    "import androidx.compose.foundation.layout.weight",
     "import androidx.compose.foundation.lazy.LazyColumn",
     "import androidx.compose.foundation.lazy.items",
     "import androidx.compose.material3.Divider",
-    "import androidx.compose.material3.Popup",
-    "import androidx.compose.material3.Surface",
+    "import androidx.compose.runtime.mutableStateOf",
+    "import androidx.compose.runtime.saveable.rememberSaveable",
+    "import androidx.compose.runtime.setValue",
+    "import androidx.compose.runtime.getValue",
 ]
 
 # ----------------------------------------------------------------------
@@ -349,27 +283,44 @@ def patch_form_fields(content):
             print("[WARNING] Could not find import block; adding at top")
             content = import_block + content
 
-    # 2. Find the existing FormDropdownField function and replace it completely
-    func_start = content.find("fun FormDropdownField")
-    if func_start == -1:
-        print("[ERROR] Could not find 'fun FormDropdownField' in FormFields.kt")
+    # 2. Locate and replace the ExposedDropdownMenu block
+    start_idx = content.find("ExposedDropdownMenu(")
+    if start_idx == -1:
+        print("[ERROR] Could not find 'ExposedDropdownMenu(' in FormFields.kt")
         return content
 
-    # Find the opening brace of the function
-    brace_pos = content.find("{", func_start)
+    # Find the matching ')' for the parameters
+    paren_depth = 0
+    params_end = -1
+    for i in range(start_idx + len("ExposedDropdownMenu("), len(content)):
+        ch = content[i]
+        if ch == '(':
+            paren_depth += 1
+        elif ch == ')':
+            if paren_depth == 0:
+                params_end = i
+                break
+            else:
+                paren_depth -= 1
+    if params_end == -1:
+        print("[ERROR] Could not find closing ')' for ExposedDropdownMenu parameters")
+        return content
+
+    # Find the opening brace of the block after the ')'
+    brace_pos = content.find("{", params_end)
     if brace_pos == -1:
-        print("[ERROR] Could not find opening brace for FormDropdownField")
+        print("[ERROR] Could not find opening brace for ExposedDropdownMenu block")
         return content
 
-    # Find the matching closing brace
-    end_func = find_matching_brace(content, brace_pos)
-    if end_func == -1:
-        print("[ERROR] Could not find closing brace for FormDropdownField")
+    # Find matching closing brace
+    block_end = find_matching_brace(content, brace_pos)
+    if block_end == -1:
+        print("[ERROR] Could not find closing brace for ExposedDropdownMenu block")
         return content
 
-    # Replace the whole function
-    content = content[:func_start] + NEW_FORM_DROPDOWN_FIELD + content[end_func+1:]
-    print("[INFO] Replaced FormDropdownField with searchable lazy version")
+    # Replace the entire call from start_idx to block_end (inclusive)
+    content = content[:start_idx] + NEW_DROPDOWN_BLOCK + content[block_end+1:]
+    print("[INFO] Replaced ExposedDropdownMenu with searchable lazy version")
 
     return content
 
@@ -430,6 +381,6 @@ def main(project_root):
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: python fix_dropdown_with_search.py <project_root>")
+        print("Usage: python fix_dropdown_final_working.py <project_root>")
         sys.exit(1)
     main(sys.argv[1])
