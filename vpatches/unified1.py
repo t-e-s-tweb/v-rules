@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unified patcher – includes BIND‑style DNS hosts + all previous changes.
+Final unified patcher – fixes dropdown crash and DNS parallel/stale toggling.
 """
 
 import re
@@ -856,7 +856,7 @@ def patch_settings():
 
 
 # ----------------------------------------------------------------------
-# 8. FormFields.kt – make dropdown lazy with LazyColumn
+# 8. FormFields.kt – fix dropdown crash by adding heightIn(max = 300.dp)
 # ----------------------------------------------------------------------
 def patch_formfields():
     p = BASE / "app/src/main/java/com/v2ray/ang/compose/FormFields.kt"
@@ -865,15 +865,16 @@ def patch_formfields():
         return
     c = read(p)
 
-    # Add missing imports
-    if "import androidx.compose.foundation.lazy.LazyColumn" not in c:
+    # Add missing import for heightIn if not present
+    if "import androidx.compose.foundation.layout.heightIn" not in c:
         last_import = re.search(r'^import .*$', c, re.MULTILINE)
         if last_import:
             pos = last_import.end()
-            c = c[:pos] + "\nimport androidx.compose.foundation.lazy.LazyColumn\nimport androidx.compose.foundation.lazy.items\nimport androidx.compose.foundation.layout.heightIn\n" + c[pos:]
-            print("✓ FormFields: added imports for LazyColumn, items, heightIn")
+            c = c[:pos] + "\nimport androidx.compose.foundation.layout.heightIn\n" + c[pos:]
+            print("✓ FormFields: added import for heightIn")
 
-    # Replace the dropdown menu content
+    # Modify the ExposedDropdownMenu modifier to include heightIn(max = 300.dp)
+    # We'll replace the entire block to ensure consistency.
     old_menu = '''        ExposedDropdownMenu(
             expanded = expanded,
             onDismissRequest = { expanded = false },
@@ -895,31 +896,26 @@ def patch_formfields():
     new_menu = '''        ExposedDropdownMenu(
             expanded = expanded,
             onDismissRequest = { expanded = false },
-            modifier = Modifier.verticalScrollbar(menuScrollState),
+            modifier = Modifier
+                .verticalScrollbar(menuScrollState)
+                .heightIn(max = 300.dp),
             scrollState = menuScrollState,
             containerColor = MaterialTheme.colorScheme.surface
         ) {
-            // LazyColumn for better performance with large lists
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 300.dp)
-            ) {
-                items(options) { option ->
-                    DropdownMenuItem(
-                        text = { Text(option) },
-                        onClick = {
-                            onValueChange(option)
-                            expanded = false
-                            focusManager.clearFocus()
-                        }
-                    )
-                }
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option) },
+                    onClick = {
+                        onValueChange(option)
+                        expanded = false
+                        focusManager.clearFocus()
+                    }
+                )
             }
         }'''
     if old_menu in c:
         c = c.replace(old_menu, new_menu, 1)
-        print("✓ FormFields: replaced dropdown with lazy version")
+        print("✓ FormFields: added heightIn to dropdown menu to prevent crash")
     else:
         print("⚠ FormFields: could not find the ExposedDropdownMenu block")
 
@@ -931,7 +927,7 @@ def patch_formfields():
 # ----------------------------------------------------------------------
 def main():
     print("=" * 70)
-    print("Unified Patcher – all changes (with BIND‑style hosts)")
+    print("Final Unified Patcher – all fixes included")
     print("=" * 70)
 
     try:
