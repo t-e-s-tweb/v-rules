@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-v2rayNG Dropdown Slowness Fix – Final
+v2rayNG Dropdown Slowness Fix – Corrected
 
-- Caches getProfileRemarks() results with versioning
-- Invalidates cache on all server list modifications
+- Caches getProfileRemarks() with versioning
+- Invalidates cache on server list changes
 - Pre-warms cache on app startup
-- Uses LazyColumn inside dropdown for virtualization
+- Replaces dropdown Column with LazyColumn (with proper imports)
 """
 
 import os
 import re
 import sys
 
-# File paths relative to project root
 SETTINGS_FILE = "V2rayNG/app/src/main/java/com/v2ray/ang/handler/SettingsManager.kt"
 MMKV_FILE = "V2rayNG/app/src/main/java/com/v2ray/ang/handler/MmkvManager.kt"
 MAIN_ACTIVITY_FILE = "V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainActivity.kt"
@@ -71,23 +70,9 @@ PREWARM_CODE = """        // Pre-warm profile remarks cache for fast dropdowns
 """
 
 # ----------------------------------------------------------------------
-# Patches for FormFields.kt
+# Corrected patch for FormFields.kt
 
-# We need to replace the ExposedDropdownMenu content.
-# The original block:
-# ExposedDropdownMenu(
-#     expanded = expanded,
-#     onDismissRequest = { expanded = false },
-#     modifier = Modifier.verticalScrollbar(menuScrollState),
-#     scrollState = menuScrollState,
-#     containerColor = MaterialTheme.colorScheme.surface
-# ) {
-#     options.forEach { option ->
-#         DropdownMenuItem(...)
-#     }
-# }
-
-NEW_DROPDOWN_MENU = """    ExposedDropdownMenu(
+NEW_DROPDOWN_MENU_BLOCK = """    ExposedDropdownMenu(
         expanded = expanded,
         onDismissRequest = { expanded = false },
         modifier = Modifier.heightIn(max = 300.dp),
@@ -107,10 +92,11 @@ NEW_DROPDOWN_MENU = """    ExposedDropdownMenu(
         }
     }"""
 
-IMPORTS_TO_ADD = """
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-"""
+REQUIRED_IMPORTS = [
+    "import androidx.compose.foundation.layout.heightIn",
+    "import androidx.compose.foundation.lazy.LazyColumn",
+    "import androidx.compose.foundation.lazy.items",
+]
 
 # ----------------------------------------------------------------------
 # Utilities
@@ -140,7 +126,6 @@ def find_matching_brace(text, start_pos):
 
 
 def find_function_brace(content, func_name):
-    """Find start and end of a function by name."""
     pattern = r"fun\s+" + re.escape(func_name) + r"\s*\([^)]*\)\s*[:=]?\s*[^{]*\{"
     match = re.search(pattern, content, re.MULTILINE)
     if not match:
@@ -167,7 +152,6 @@ def replace_function(content, func_name, new_body):
 
 
 def patch_settings_manager(content):
-    # Insert cache fields after 'object SettingsManager {'
     obj_pattern = r"(object SettingsManager\s*\{)"
     obj_match = re.search(obj_pattern, content)
     if not obj_match:
@@ -181,7 +165,6 @@ def patch_settings_manager(content):
     else:
         print("[INFO] Cache fields already present")
 
-    # Replace getProfileRemarks
     if "getProfileRemarks" in content:
         content = replace_function(content, "getProfileRemarks", NEW_GET_PROFILE_REMARKS_BODY)
         print("[INFO] Replaced getProfileRemarks")
@@ -243,50 +226,44 @@ def patch_main_activity(content):
 
 
 def patch_form_fields(content):
-    # 1. Add missing imports if not already present
-    if "import androidx.compose.foundation.lazy.LazyColumn" not in content:
+    # 1. Add missing imports
+    import_block = ""
+    for imp in REQUIRED_IMPORTS:
+        if imp not in content:
+            import_block += imp + "\n"
+
+    if import_block:
         # Insert after the last import
         import_pattern = r"(import .*\n)+"
         import_match = re.search(import_pattern, content)
         if import_match:
             insert_pos = import_match.end()
-            content = content[:insert_pos] + IMPORTS_TO_ADD + "\n" + content[insert_pos:]
-            print("[INFO] Added LazyColumn imports")
+            content = content[:insert_pos] + import_block + content[insert_pos:]
+            print("[INFO] Added required imports")
         else:
             print("[WARNING] Could not find import block; adding at top")
-            content = IMPORTS_TO_ADD + "\n" + content
+            content = import_block + content
 
-    # 2. Replace the ExposedDropdownMenu block
-    # Find the line "ExposedDropdownMenu("
+    # 2. Locate the ExposedDropdownMenu block and replace it
     menu_start = content.find("ExposedDropdownMenu(")
     if menu_start == -1:
         print("[ERROR] Could not find ExposedDropdownMenu in FormFields.kt")
         return content
 
-    # Find the matching closing brace for the menu
+    # Find the opening brace
     brace_pos = content.find("{", menu_start)
     if brace_pos == -1:
         print("[ERROR] Could not find opening brace for ExposedDropdownMenu")
         return content
 
-    # Find the end of the menu block by matching braces
-    depth = 0
-    menu_end = -1
-    for i in range(brace_pos, len(content)):
-        ch = content[i]
-        if ch == '{':
-            depth += 1
-        elif ch == '}':
-            depth -= 1
-            if depth == 0:
-                menu_end = i
-                break
+    # Find matching closing brace
+    menu_end = find_matching_brace(content, brace_pos)
     if menu_end == -1:
         print("[ERROR] Could not find closing brace for ExposedDropdownMenu")
         return content
 
-    # Replace the entire menu block
-    content = content[:menu_start] + NEW_DROPDOWN_MENU + content[menu_end+1:]
+    # Replace the block
+    content = content[:menu_start] + NEW_DROPDOWN_MENU_BLOCK + content[menu_end+1:]
     print("[INFO] Replaced ExposedDropdownMenu with LazyColumn version")
 
     return content
@@ -348,6 +325,6 @@ def main(project_root):
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: python fix_all_slowdowns.py <project_root>")
+        print("Usage: python fix_all_slowdowns_fixed.py <project_root>")
         sys.exit(1)
     main(sys.argv[1])
