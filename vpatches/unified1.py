@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Final corrected unified patcher – fixes Kotlin '&&' operators and Compose imports.
+Final corrected unified patcher – fixes regex, DNS targeting, Kotlin syntax, and dropdown performance.
 """
 
 import re
@@ -267,7 +267,7 @@ def patch_coreconfigcontextbuilder():
         }
 
         try {
-            val subItem = M2rayConfigManager.decodeSubscription(config.subscriptionId) ?: return listOf(config)
+            val subItem = MmkvManager.decodeSubscription(config.subscriptionId) ?: return listOf(config)
             val resolved = mutableListOf<ProfileItem>()
             resolveCurrentServer(subItem.nextProfile)?.let { remark ->
                 SettingsManager.getServerViaRemarks(remark)?.let { resolved.add(it) }
@@ -655,7 +655,8 @@ def patch_coreconfigmanager():
         print("⚠ CoreConfigManager: handleProxyChainResolvedOutbound method not found")
 
     # 6.6 Replace the whole configureDns method with a version that uses dnsBean and sets serveStale
-    method_start = c.find("private fun configureDns(")
+    # FIXED: Explicitly target the active method signature to avoid matching commented-out code
+    method_start = c.find("private fun configureDns(\n        configContext: CoreConfigContext,")
     if method_start != -1:
         open_brace = c.find('{', method_start)
         if open_brace != -1:
@@ -865,14 +866,14 @@ def patch_formfields():
         return
     c = read(p)
 
-    # Add missing imports reliably by finding the last import line
+    # 1. Add missing imports reliably by finding the last import line
     imports_to_add = [
-        "import androidx.compose.foundation.layout.IntrinsicSize",
         "import androidx.compose.foundation.layout.heightIn",
         "import androidx.compose.foundation.layout.width",
         "import androidx.compose.foundation.lazy.LazyColumn",
         "import androidx.compose.foundation.lazy.items",
         "import androidx.compose.foundation.lazy.rememberLazyListState",
+        "import androidx.compose.ui.unit.IntrinsicSize",
         "import androidx.compose.material3.DropdownMenu"
     ]
     
@@ -884,27 +885,15 @@ def patch_formfields():
                 c = c[:last_import.end()] + "\n" + imp + c[last_import.end():]
                 print(f"✓ FormFields: added import {imp}")
 
-    # Replace ExposedDropdownMenu with DropdownMenu + LazyColumn
-    old_menu = '''        ExposedDropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
-            modifier = Modifier.verticalScrollbar(menuScrollState),
-            scrollState = menuScrollState,
-            containerColor = MaterialTheme.colorScheme.surface
-        ) {
-            options.forEach { option ->
-                DropdownMenuItem(
-                    text = { Text(option) },
-                    onClick = {
-                        onValueChange(option)
-                        expanded = false
-                        focusManager.clearFocus()
-                    }
-                )
-            }
-        }'''
+    # 2. Replace menuScrollState declaration
+    if "val menuScrollState = rememberScrollState()" in c:
+        c = c.replace("val menuScrollState = rememberScrollState()", "val listState = rememberLazyListState()")
+        print("✓ FormFields: replaced menuScrollState with listState")
+
+    # 3. Replace ExposedDropdownMenu with DropdownMenu + LazyColumn using robust regex
+    old_menu_pattern = r'ExposedDropdownMenu\(\s*expanded\s*=\s*expanded,\s*onDismissRequest\s*=\s*\{\s*expanded\s*=\s*false\s*\},\s*modifier\s*=\s*Modifier\.verticalScrollbar\(menuScrollState\),\s*scrollState\s*=\s*menuScrollState,\s*containerColor\s*=\s*MaterialTheme\.colorScheme\.surface\s*\)\s*\{\s*options\.forEach\s*\{\s*option\s*->\s*DropdownMenuItem\(\s*text\s*=\s*\{\s*Text\(option\)\s*\},\s*onClick\s*=\s*\{\s*onValueChange\(option\)\s*expanded\s*=\s*false\s*focusManager\.clearFocus\(\)\s*\}\s*\)\s*\}\s*\}'
     
-    new_menu = '''        DropdownMenu(
+    new_menu = '''DropdownMenu(
             expanded = expanded,
             onDismissRequest = { expanded = false },
             modifier = Modifier
@@ -913,7 +902,7 @@ def patch_formfields():
             containerColor = MaterialTheme.colorScheme.surface
         ) {
             LazyColumn(
-                state = rememberLazyListState(),
+                state = listState,
                 modifier = Modifier.width(IntrinsicSize.Min)
             ) {
                 items(options) { option ->
@@ -929,11 +918,11 @@ def patch_formfields():
             }
         }'''
     
-    if old_menu in c:
-        c = c.replace(old_menu, new_menu, 1)
-        print("✓ FormFields: replaced ExposedDropdownMenu with LazyColumn DropdownMenu")
+    if re.search(old_menu_pattern, c, re.DOTALL):
+        c = re.sub(old_menu_pattern, new_menu, c, flags=re.DOTALL)
+        print("✓ FormFields: replaced ExposedDropdownMenu with DropdownMenu + LazyColumn")
     else:
-        print("⚠ FormFields: could not find ExposedDropdownMenu block to replace")
+        print("⚠ FormFields: could not find ExposedDropdownMenu block to replace. Manual check required.")
 
     write(p, c)
 
@@ -943,7 +932,7 @@ def patch_formfields():
 # ----------------------------------------------------------------------
 def main():
     print("=" * 70)
-    print("Final Corrected Unified Patcher – Kotlin '&&' and Compose imports fixed")
+    print("Final Corrected Unified Patcher – regex, Kotlin syntax, and dropdown perf fixed")
     print("=" * 70)
 
     try:
