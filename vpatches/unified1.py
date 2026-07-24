@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
 """
-v2rayNG Dropdown Slowness Fix – Corrected
-
-- Caches getProfileRemarks() with versioning
-- Invalidates cache on server list changes
-- Pre-warms cache on app startup
-- Replaces dropdown Column with LazyColumn (with proper imports)
+v2rayNG Dropdown Slowness Fix – Final (with precise replacement)
 """
 
 import os
@@ -19,7 +14,6 @@ FORM_FIELDS_FILE = "V2rayNG/app/src/main/java/com/v2ray/ang/compose/FormFields.k
 
 # ----------------------------------------------------------------------
 # Patches for SettingsManager.kt
-
 NEW_SETTINGS_CACHE_FIELDS = """
     // Cached profile remarks with versioning
     private val cachedProfileRemarksMap = java.util.concurrent.ConcurrentHashMap<Set<EConfigType>, Pair<Int, List<String>>>()
@@ -61,7 +55,6 @@ INVALIDATION_LINE = "        SettingsManager.invalidateProfileRemarksCache()\n"
 
 # ----------------------------------------------------------------------
 # Patches for MainActivity.kt
-
 PREWARM_CODE = """        // Pre-warm profile remarks cache for fast dropdowns
         lifecycleScope.launch(Dispatchers.IO) {
             SettingsManager.getProfileRemarks()
@@ -70,9 +63,8 @@ PREWARM_CODE = """        // Pre-warm profile remarks cache for fast dropdowns
 """
 
 # ----------------------------------------------------------------------
-# Corrected patch for FormFields.kt
-
-NEW_DROPDOWN_MENU_BLOCK = """    ExposedDropdownMenu(
+# Correct replacement for FormFields.kt
+NEW_DROPDOWN_CALL = """    ExposedDropdownMenu(
         expanded = expanded,
         onDismissRequest = { expanded = false },
         modifier = Modifier.heightIn(max = 300.dp),
@@ -113,6 +105,7 @@ def write_file(path, content):
 
 
 def find_matching_brace(text, start_pos):
+    """Return position of matching closing brace."""
     depth = 0
     for i in range(start_pos, len(text)):
         ch = text[i]
@@ -244,26 +237,49 @@ def patch_form_fields(content):
             print("[WARNING] Could not find import block; adding at top")
             content = import_block + content
 
-    # 2. Locate the ExposedDropdownMenu block and replace it
-    menu_start = content.find("ExposedDropdownMenu(")
-    if menu_start == -1:
-        print("[ERROR] Could not find ExposedDropdownMenu in FormFields.kt")
+    # 2. Locate the ExposedDropdownMenu call and replace it
+    # Find the start of the call: "ExposedDropdownMenu("
+    start_idx = content.find("ExposedDropdownMenu(")
+    if start_idx == -1:
+        print("[ERROR] Could not find 'ExposedDropdownMenu(' in FormFields.kt")
         return content
 
-    # Find the opening brace
-    brace_pos = content.find("{", menu_start)
+    # Find the opening brace of the block (the one after the parameters)
+    # We need to skip the parentheses of the call. We'll find the matching ')' that ends the parameters.
+    # Then the next '{' is the block opening.
+    # However, we can simply find the first '{' after start_idx, but there might be nested braces in default parameters? Not likely.
+    # We'll assume the call is like: ExposedDropdownMenu(...) { ... }
+    # So find the matching ')' for the parameters first.
+    paren_depth = 0
+    params_end = -1
+    for i in range(start_idx + len("ExposedDropdownMenu("), len(content)):
+        ch = content[i]
+        if ch == '(':
+            paren_depth += 1
+        elif ch == ')':
+            if paren_depth == 0:
+                params_end = i
+                break
+            else:
+                paren_depth -= 1
+    if params_end == -1:
+        print("[ERROR] Could not find closing ')' for ExposedDropdownMenu parameters")
+        return content
+
+    # Now find the opening brace of the block after the ')'
+    brace_pos = content.find("{", params_end)
     if brace_pos == -1:
-        print("[ERROR] Could not find opening brace for ExposedDropdownMenu")
+        print("[ERROR] Could not find opening brace for ExposedDropdownMenu block")
         return content
 
     # Find matching closing brace
-    menu_end = find_matching_brace(content, brace_pos)
-    if menu_end == -1:
-        print("[ERROR] Could not find closing brace for ExposedDropdownMenu")
+    block_end = find_matching_brace(content, brace_pos)
+    if block_end == -1:
+        print("[ERROR] Could not find closing brace for ExposedDropdownMenu block")
         return content
 
-    # Replace the block
-    content = content[:menu_start] + NEW_DROPDOWN_MENU_BLOCK + content[menu_end+1:]
+    # Replace the entire call from start_idx to block_end (inclusive)
+    content = content[:start_idx] + NEW_DROPDOWN_CALL + content[block_end+1:]
     print("[INFO] Replaced ExposedDropdownMenu with LazyColumn version")
 
     return content
@@ -325,6 +341,6 @@ def main(project_root):
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: python fix_all_slowdowns_fixed.py <project_root>")
+        print("Usage: python fix_all_slowdowns_final.py <project_root>")
         sys.exit(1)
     main(sys.argv[1])
