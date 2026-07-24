@@ -1,41 +1,47 @@
 #!/usr/bin/env python3
 """
-v2rayNG Dropdown Slowness Fix (with cache pre‑warm)
+v2rayNG Dropdown Slowness Fix v2 (robust)
 
-- Caches getProfileRemarks() results per excludeConfigTypes set
-- Invalidates all caches on server list changes
-- Pre‑warms the cache on app startup
+- Replaces getProfileRemarks() with a cached version
+- Invalidates cache on any server list modification
+- Pre-warms cache on app startup
+- Logs cache hits/misses for debugging
 """
 
 import os
 import re
 import sys
 
-# File paths relative to project root
 SETTINGS_FILE = "V2rayNG/app/src/main/java/com/v2ray/ang/handler/SettingsManager.kt"
 MMKV_FILE = "V2rayNG/app/src/main/java/com/v2ray/ang/handler/MmkvManager.kt"
 MAIN_ACTIVITY_FILE = "V2rayNG/app/src/main/java/com/v2ray/ang/ui/main/MainActivity.kt"
 
 # ----------------------------------------------------------------------
-# Patches for SettingsManager.kt
+# New SettingsManager code
 
-CACHE_FIELDS = """
-    // Cached remarks lists by excludeConfigTypes (for fast dropdowns)
-    private val cachedProfileRemarksMap = mutableMapOf<Set<EConfigType>, List<String>>()
+NEW_SETTINGS_CACHE_FIELDS = """
+    // Cached profile remarks with versioning
+    private val cachedProfileRemarksMap = java.util.concurrent.ConcurrentHashMap<Set<EConfigType>, Pair<Int, List<String>>>()
+    private var cacheVersion = 0
 
-    /**
-     * Invalidates all cached profile remarks lists.
-     * Must be called whenever the server list changes.
-     */
     fun invalidateProfileRemarksCache() {
+        cacheVersion++
         cachedProfileRemarksMap.clear()
+        LogUtil.d(AppConfig.TAG, "Profile remarks cache invalidated (version $cacheVersion)")
     }
 """
 
 NEW_GET_PROFILE_REMARKS_BODY = """
     fun getProfileRemarks(excludeConfigTypes: Set<EConfigType> = setOf(EConfigType.CUSTOM)): List<String> {
-        cachedProfileRemarksMap[excludeConfigTypes]?.let { return it }
+        val currentVersion = cacheVersion
+        cachedProfileRemarksMap[excludeConfigTypes]?.let { (version, list) ->
+            if (version == currentVersion) {
+                LogUtil.d(AppConfig.TAG, "Profile remarks cache HIT for $excludeConfigTypes")
+                return list
+            }
+        }
 
+        LogUtil.d(AppConfig.TAG, "Profile remarks cache MISS for $excludeConfigTypes, rebuilding...")
         val result = decodeAllServerList()
             .asSequence()
             .mapNotNull { guid -> decodeServerConfig(guid) }
@@ -45,7 +51,7 @@ NEW_GET_PROFILE_REMARKS_BODY = """
             .distinct()
             .toList()
 
-        cachedProfileRemarksMap[excludeConfigTypes] = result
+        cachedProfileRemarksMap[excludeConfigTypes] = currentVersion to result
         return result
     }
 """
@@ -53,7 +59,7 @@ NEW_GET_PROFILE_REMARKS_BODY = """
 INVALIDATION_LINE = "        SettingsManager.invalidateProfileRemarksCache()\n"
 
 # ----------------------------------------------------------------------
-# Patches for MainActivity.kt
+# New MainActivity pre-warm code
 
 PREWARM_CODE = """        // Pre-warm profile remarks cache for fast dropdowns
         lifecycleScope.launch(Dispatchers.IO) {
@@ -76,17 +82,39 @@ def write_file(path, content):
         f.write(content)
 
 
-def find_matching_brace(text, start_pos):
+def find_function_brace(content, func_name):
+    """Find the start and end positions of a function by name."""
+    pattern = r"fun\s+" + re.escape(func_name) + r"\s*\([^)]*\)\s*[:=]?\s*[^{]*\{"
+    match = re.search(pattern, content, re.MULTILINE)
+    if not match:
+        return None
+    start = match.start()
+    brace_pos = match.end() - 1  # position of '{'
+    # find matching brace
     depth = 0
-    for i in range(start_pos, len(text)):
-        ch = text[i]
-        if ch == "{":
+    end = -1
+    for i in range(brace_pos, len(content)):
+        ch = content[i]
+        if ch == '{':
             depth += 1
-        elif ch == "}":
+        elif ch == '}':
             depth -= 1
             if depth == 0:
-                return i
-    return -1
+                end = i
+                break
+    if end == -1:
+        return None
+    return start, end
+
+
+def replace_function(content, func_name, new_body):
+    """Replace the entire function definition with new_body."""
+    pos = find_function_brace(content, func_name)
+    if not pos:
+        print(f"[ERROR] Could not find function {func_name}")
+        return content
+    start, end = pos
+    return content[:start] + new_body + content[end+1:]
 
 
 # ----------------------------------------------------------------------
@@ -94,7 +122,7 @@ def find_matching_brace(text, start_pos):
 
 
 def patch_settings_manager(content):
-    # Insert cache fields after "object SettingsManager {"
+    # 1. Insert cache fields after 'object SettingsManager {'
     obj_pattern = r"(object SettingsManager\s*\{)"
     obj_match = re.search(obj_pattern, content)
     if not obj_match:
@@ -103,35 +131,24 @@ def patch_settings_manager(content):
 
     brace_pos = obj_match.end()
     if "cachedProfileRemarksMap" not in content:
-        content = content[:brace_pos] + "\n" + CACHE_FIELDS + content[brace_pos:]
-        print("[INFO] Added cache fields to SettingsManager")
+        content = content[:brace_pos] + "\n" + NEW_SETTINGS_CACHE_FIELDS + content[brace_pos:]
+        print("[INFO] Added cache fields")
     else:
         print("[INFO] Cache fields already present")
 
-    # Replace getProfileRemarks
-    func_start = content.find("fun getProfileRemarks")
-    if func_start == -1:
-        print("[ERROR] Could not find 'fun getProfileRemarks'")
-        return content
-
-    brace_pos_func = content.find("{", func_start)
-    if brace_pos_func == -1:
-        print("[ERROR] Could not find opening brace for getProfileRemarks")
-        return content
-
-    end_func = find_matching_brace(content, brace_pos_func)
-    if end_func == -1:
-        print("[ERROR] Could not find closing brace for getProfileRemarks")
-        return content
-
-    content = content[:func_start] + NEW_GET_PROFILE_REMARKS_BODY + content[end_func+1:]
-    print("[INFO] Replaced getProfileRemarks with cached version")
+    # 2. Replace getProfileRemarks
+    if "getProfileRemarks" in content:
+        content = replace_function(content, "getProfileRemarks", NEW_GET_PROFILE_REMARKS_BODY)
+        print("[INFO] Replaced getProfileRemarks")
+    else:
+        print("[ERROR] Could not find getProfileRemarks")
 
     return content
 
 
 def patch_mmkv_manager(content):
     functions = [
+        "encodeServerConfig",
         "encodeServerList",
         "removeServer",
         "removeServerViaSubid",
@@ -140,28 +157,22 @@ def patch_mmkv_manager(content):
     ]
 
     for func_name in functions:
-        pattern = r"fun\s+" + re.escape(func_name) + r"\s*\("
-        match = re.search(pattern, content)
-        if not match:
+        pos = find_function_brace(content, func_name)
+        if not pos:
             print(f"[WARNING] Could not find function {func_name}")
             continue
 
-        start_search = match.end()
-        brace_pos = content.find("{", start_search)
-        if brace_pos == -1:
-            print(f"[WARNING] Could not find opening brace for {func_name}")
-            continue
-
-        end_func = find_matching_brace(content, brace_pos)
-        if end_func == -1:
-            print(f"[WARNING] Could not find closing brace for {func_name}")
-            continue
-
-        body = content[brace_pos+1:end_func]
+        start, end = pos
+        # Check if invalidation already exists
+        body = content[start:end+1]
         if "SettingsManager.invalidateProfileRemarksCache()" in body:
             print(f"[INFO] Invalidation already present in {func_name}")
             continue
 
+        # Insert the line after the opening brace
+        brace_pos = content.find("{", start)
+        if brace_pos == -1:
+            continue
         insert_pos = brace_pos + 1
         if content[insert_pos:insert_pos+1] == "\n":
             insert_pos += 1
@@ -172,25 +183,19 @@ def patch_mmkv_manager(content):
 
 
 def patch_main_activity(content):
-    # Look for the line where we initialize the ViewModel and insert after it.
-    # Pattern: "mainViewModel.onAction(MainAction.Initialize)"
     pattern = r"(mainViewModel\.onAction\(MainAction\.Initialize\))"
     match = re.search(pattern, content)
     if not match:
-        print("[ERROR] Could not find mainViewModel.onAction(MainAction.Initialize) in MainActivity.kt")
+        print("[ERROR] Could not find mainViewModel.onAction(MainAction.Initialize)")
         return content
 
-    # Check if pre-warm code is already present.
     if "Pre-warm profile remarks cache" in content:
-        print("[INFO] Pre-warm code already present in MainActivity.kt")
+        print("[INFO] Pre-warm already present")
         return content
 
-    # Insert after the matched line.
     insert_pos = match.end()
-    # Add a newline before the insertion to keep formatting.
     content = content[:insert_pos] + "\n" + PREWARM_CODE + content[insert_pos:]
-    print("[INFO] Added cache pre-warm to MainActivity.kt")
-
+    print("[INFO] Added pre-warm to MainActivity")
     return content
 
 
@@ -236,11 +241,11 @@ def main(project_root):
         print("[INFO] No changes to MainActivity.kt.")
 
     print("[DONE] All patches applied.")
+    print("Please rebuild the app and check the logcat for 'Profile remarks cache' messages.")
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: python fix_dropdown_slowness.py <project_root>")
-        print("  <project_root> - path to the root of the v2rayNG project (containing V2rayNG/ subfolder)")
+        print("Usage: python fix_dropdown_slowness_v2.py <project_root>")
         sys.exit(1)
     main(sys.argv[1])
