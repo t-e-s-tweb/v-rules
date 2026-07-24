@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-Corrected patcher – applies targeted changes without corrupting the file.
+Unified patcher for v2rayNG:
+- Adds CURRENT_SERVER placeholder, DNS parallel/stale preferences.
+- Adds None and [Current Server] to subscription chain dropdowns.
+- Adds DNS parallel/stale UI toggles in Settings.
+- Optimises FormDropdownField with LazyColumn.
+- Injects custom outbound handling and chain proxy support.
 """
 
 import re
@@ -18,8 +23,11 @@ def backup_kotlin(p: Path):
         shutil.copy2(p, bak)
         print(f"  backup: {bak.name}")
 
-def read(p): return p.read_text(encoding="utf-8")
-def write(p, s): p.write_text(s, encoding="utf-8")
+def read(p):
+    return p.read_text(encoding="utf-8")
+
+def write(p, s):
+    p.write_text(s, encoding="utf-8")
 
 
 # ----------------------------------------------------------------------
@@ -58,6 +66,8 @@ def patch_appconfig():
         if old in c:
             c = c.replace(old, new, 1)
             print("✓ AppConfig: added DNS parallel/stale prefs")
+        else:
+            print("⚠ AppConfig: PREF_DNS_HOSTS not found, skipping DNS prefs")
 
     write(p, c)
 
@@ -118,7 +128,7 @@ def patch_subedit():
     else:
         print("⚠ SubEditActivity: profileSuggestions line not found")
 
-    # Convert saved values to display strings when loading (fix type mismatch: ensure String)
+    # Convert saved values to display strings when loading (fix type mismatch)
     old_load_prev = "var prevProfile by rememberSaveable { mutableStateOf(initial.prevProfile ?: \"\") }"
     new_load_prev = '''    var prevProfile by rememberSaveable { mutableStateOf(
         when (initial.prevProfile) {
@@ -170,26 +180,40 @@ def patch_subedit():
 
 
 # ----------------------------------------------------------------------
-# 4. strings.xml – add "None" and "[Current Server]"
+# 4. strings.xml – add all needed strings
 # ----------------------------------------------------------------------
 def patch_strings():
     p = BASE / "app/src/main/res/values/strings.xml"
     c = read(p)
-    needed = {"sub_setting_none": "None", "sub_setting_current_server": "[Current Server]"}
-    changed = False
+
+    new_strings = []
+    # Needed strings
+    needed = {
+        "sub_setting_none": "None",
+        "sub_setting_current_server": "[Current Server]",
+        "title_pref_dns_parallel_query": "DNS Parallel Query",
+        "summary_pref_dns_parallel_query": "Enable parallel queries to all DNS servers for faster resolution",
+        "title_pref_dns_serve_stale": "DNS Serve Stale",
+        "summary_pref_dns_serve_stale": "Serve stale DNS records while refreshing in background",
+    }
     for k, v in needed.items():
         if f'name="{k}"' in c:
             continue
+        new_strings.append(f'    <string name="{k}">{v}</string>')
+
+    if new_strings:
+        # Insert before </resources>
         m = re.search(r'(\s*)</resources>', c, re.IGNORECASE)
-        if not m:
-            print(f"✗ strings.xml: </resources> not found")
-            return
-        indent, pos = m.group(1), m.start()
-        c = c[:pos] + f'\n{indent}<string name="{k}">{v}</string>' + c[pos:]
-        changed = True
-    if changed:
-        write(p, c)
-        print("✓ strings.xml: added None and [Current Server]")
+        if m:
+            indent, pos = m.group(1), m.start()
+            insertion = "\n" + "\n".join(new_strings) + "\n" + indent
+            c = c[:pos] + insertion + c[pos:]
+            write(p, c)
+            print(f"✓ strings.xml: added {len(new_strings)} strings")
+        else:
+            print("⚠ strings.xml: </resources> not found")
+    else:
+        print("• strings.xml: all strings already present")
 
 
 # ----------------------------------------------------------------------
@@ -287,7 +311,6 @@ def patch_coreconfigmanager():
 
     # 6.1 Add missing import
     if "import com.v2ray.ang.dto.entities.SubscriptionItem" not in c:
-        # Insert after the last import
         last_import = re.search(r'^import .*$', c, re.MULTILINE)
         if last_import:
             pos = last_import.end()
@@ -462,7 +485,6 @@ def patch_coreconfigmanager():
     }
 '''
     if "private fun getCurrentMainServerRemarks()" not in c:
-        # Insert before last '}'
         lines = c.splitlines()
         for i in range(len(lines)-1, -1, -1):
             if lines[i].strip() == '}':
@@ -479,7 +501,6 @@ def patch_coreconfigmanager():
         print("✓ CoreConfigManager: added injectCustomOutbounds call")
 
     # 6.4 Update buildOutbounds signature and call
-    # Add outboundTagMap parameter to buildOutbounds
     old_build_outbounds = '''    private fun buildOutbounds(
         resolvedOutbound: CoreConfigContext.ResolvedOutbound,
         prepend: Boolean,
@@ -503,7 +524,6 @@ def patch_coreconfigmanager():
     else:
         print("⚠ CoreConfigManager: buildOutbounds signature not found")
 
-    # Update call to handleProxyChainResolvedOutbound inside buildOutbounds
     old_call = '''            CoreResolvedType.PROXYCHAIN -> handleProxyChainResolvedOutbound(
                 resolvedOutbound = resolvedOutbound,
                 prepend = prepend,
@@ -523,18 +543,11 @@ def patch_coreconfigmanager():
     else:
         print("⚠ CoreConfigManager: call not found")
 
-    # 6.5 Replace handleProxyChainResolvedOutbound body with new version
-    # Find the method start and extract its body using brace counting
+    # 6.5 Replace handleProxyChainResolvedOutbound body
     method_start = c.find("private fun handleProxyChainResolvedOutbound")
-    if method_start == -1:
-        print("⚠ CoreConfigManager: handleProxyChainResolvedOutbound method not found")
-    else:
-        # Find the opening brace
+    if method_start != -1:
         open_brace = c.find('{', method_start)
-        if open_brace == -1:
-            print("⚠ CoreConfigManager: could not find opening brace for handleProxyChainResolvedOutbound")
-        else:
-            # Count braces to find matching closing brace
+        if open_brace != -1:
             brace_count = 1
             i = open_brace + 1
             while i < len(c) and brace_count > 0:
@@ -543,14 +556,7 @@ def patch_coreconfigmanager():
                 elif c[i] == '}':
                     brace_count -= 1
                 i += 1
-            if brace_count != 0:
-                print("⚠ CoreConfigManager: brace mismatch for handleProxyChainResolvedOutbound")
-            else:
-                # Replace the method body (from open_brace to i) with new body
-                # We keep the signature as is, but we need to add the new parameter.
-                # We already added outboundTagMap to the signature in the previous step.
-                # However, the signature in the file may not have the new parameter yet.
-                # We'll add it here as well.
+            if brace_count == 0:
                 new_signature = '''private fun handleProxyChainResolvedOutbound(
         resolvedOutbound: CoreConfigContext.ResolvedOutbound,
         prepend: Boolean,
@@ -558,11 +564,6 @@ def patch_coreconfigmanager():
         v2rayConfig: V2rayConfig,
         outboundTagMap: MutableMap<String, String>,
     )'''
-                # Find the existing signature line and replace it
-                sig_start = c.rfind('\n', 0, method_start) + 1
-                sig_end = c.find('{', method_start)
-                old_sig = c[sig_start:sig_end].strip()
-                # Replace the whole signature+body
                 new_body = ''' {
         LogUtil.d(AppConfig.TAG, "🔗 Processing PROXYCHAIN for tag='${resolvedOutbound.tag}', prepend=$prepend")
         LogUtil.d(AppConfig.TAG, "   Number of resolvedProfiles: ${resolvedOutbound.resolvedProfiles.size}")
@@ -650,15 +651,18 @@ def patch_coreconfigmanager():
             }
         }
     }'''
-                # Replace the old signature+body with new_signature+new_body
-                # We'll locate the method start and end
                 method_end = i
                 c = c[:method_start] + new_signature + new_body + c[method_end:]
                 print("✓ CoreConfigManager: replaced handleProxyChainResolvedOutbound body")
+            else:
+                print("⚠ CoreConfigManager: brace mismatch for handleProxyChainResolvedOutbound")
+        else:
+            print("⚠ CoreConfigManager: could not find opening brace for handleProxyChainResolvedOutbound")
+    else:
+        print("⚠ CoreConfigManager: handleProxyChainResolvedOutbound method not found")
 
     # 6.6 Add DNS serveStale setting in configureDns
     if "serveStale" not in c:
-        # Find where dnsBean is assigned and add serveStale
         pattern = r'(dnsBean\.enableParallelQuery = .*)'
         if re.search(pattern, c):
             c = re.sub(pattern, r'\1\n        if (MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_SERVE_STALE, false) == true) {\n            dnsBean.serveStale = true\n        }', c)
@@ -671,11 +675,117 @@ def patch_coreconfigmanager():
 
 
 # ----------------------------------------------------------------------
+# 7. SettingsActivity.kt – add DNS parallel/stale switches
+# ----------------------------------------------------------------------
+def patch_settings():
+    p = BASE / "app/src/main/java/com/v2ray/ang/ui/settings/SettingsActivity.kt"
+    if not p.exists():
+        print("✗ SettingsActivity.kt not found")
+        return
+    c = read(p)
+
+    # Declare new states
+    old_decls = "var dnsHosts by rememberMmkvString(AppConfig.PREF_DNS_HOSTS, \"\")"
+    new_decls = old_decls + """
+    var dnsParallelQuery by rememberMmkvBool(AppConfig.PREF_DNS_PARALLEL_QUERY, false)
+    var dnsServeStale by rememberMmkvBool(AppConfig.PREF_DNS_SERVE_STALE, false)"""
+    if old_decls in c and "dnsParallelQuery" not in c:
+        c = c.replace(old_decls, new_decls, 1)
+        print("✓ SettingsActivity: added DNS parallel/stale state declarations")
+    elif "dnsParallelQuery" in c:
+        print("• SettingsActivity: DNS states already present")
+    else:
+        print("⚠ SettingsActivity: could not find dnsHosts declaration block")
+
+    # Insert switches after the dnsHosts edit item
+    pattern = r'(SettingsEditItem\(\s*title = stringResource\(R\.string\.title_pref_dns_hosts\),\s*value = dnsHosts,\s*onValueChanged = \{ dnsHosts = it \}\s*\))'
+    if re.search(pattern, c, re.DOTALL) and "title_pref_dns_parallel_query" not in c:
+        replacement = r'\1\n                SettingsSwitchItem(\n                    title = stringResource(R.string.title_pref_dns_parallel_query),\n                    summary = stringResource(R.string.summary_pref_dns_parallel_query),\n                    checked = dnsParallelQuery,\n                    onCheckedChange = { dnsParallelQuery = it }\n                )\n                SettingsSwitchItem(\n                    title = stringResource(R.string.title_pref_dns_serve_stale),\n                    summary = stringResource(R.string.summary_pref_dns_serve_stale),\n                    checked = dnsServeStale,\n                    onCheckedChange = { dnsServeStale = it }\n                )'
+        c = re.sub(pattern, replacement, c, flags=re.DOTALL)
+        print("✓ SettingsActivity: inserted DNS parallel/stale switches")
+    else:
+        print("⚠ SettingsActivity: dnsHosts block not found or switches already present")
+
+    write(p, c)
+
+
+# ----------------------------------------------------------------------
+# 8. FormFields.kt – make dropdown lazy with LazyColumn
+# ----------------------------------------------------------------------
+def patch_formfields():
+    p = BASE / "app/src/main/java/com/v2ray/ang/compose/FormFields.kt"
+    if not p.exists():
+        print("✗ FormFields.kt not found")
+        return
+    c = read(p)
+
+    # Add missing imports
+    if "import androidx.compose.foundation.lazy.LazyColumn" not in c:
+        last_import = re.search(r'^import .*$', c, re.MULTILINE)
+        if last_import:
+            pos = last_import.end()
+            c = c[:pos] + "\nimport androidx.compose.foundation.lazy.LazyColumn\nimport androidx.compose.foundation.lazy.items\nimport androidx.compose.foundation.layout.heightIn\n" + c[pos:]
+            print("✓ FormFields: added imports for LazyColumn, items, heightIn")
+
+    # Replace the dropdown menu content
+    old_menu = '''        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.verticalScrollbar(menuScrollState),
+            scrollState = menuScrollState,
+            containerColor = MaterialTheme.colorScheme.surface
+        ) {
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option) },
+                    onClick = {
+                        onValueChange(option)
+                        expanded = false
+                        focusManager.clearFocus()
+                    }
+                )
+            }
+        }'''
+    new_menu = '''        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.verticalScrollbar(menuScrollState),
+            scrollState = menuScrollState,
+            containerColor = MaterialTheme.colorScheme.surface
+        ) {
+            // LazyColumn for better performance with large lists
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 300.dp)
+            ) {
+                items(options) { option ->
+                    DropdownMenuItem(
+                        text = { Text(option) },
+                        onClick = {
+                            onValueChange(option)
+                            expanded = false
+                            focusManager.clearFocus()
+                        }
+                    )
+                }
+            }
+        }'''
+    if old_menu in c:
+        c = c.replace(old_menu, new_menu, 1)
+        print("✓ FormFields: replaced dropdown with lazy version")
+    else:
+        print("⚠ FormFields: could not find the ExposedDropdownMenu block")
+
+    write(p, c)
+
+
+# ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
 def main():
     print("=" * 70)
-    print("Corrected Patcher – targeted changes only")
+    print("Unified Patcher – all targeted changes")
     print("=" * 70)
 
     try:
@@ -685,6 +795,8 @@ def main():
         patch_strings()
         patch_coreconfigcontextbuilder()
         patch_coreconfigmanager()
+        patch_settings()
+        patch_formfields()
         print("\n✅ All patches applied successfully.")
         print("👉 Rebuild and test.")
     except Exception as e:
