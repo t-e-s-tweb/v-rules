@@ -842,20 +842,49 @@ def patch_settings():
 
 
 # ----------------------------------------------------------------------
-# 8. FormFields.kt - FIXED: make the dropdown menu lazy (fast + no crash)
+# 8. FormFields.kt - filter by typed text + hard cap (NOT LazyColumn)
 # ----------------------------------------------------------------------
 def patch_formfields():
+    """
+    v1 of this fix wrapped the dropdown's items in a LazyColumn. That
+    crashes: Material3's ExposedDropdownMenu auto-sizes itself by querying
+    INTRINSIC measurements of its content, and LazyColumn - like any
+    SubcomposeLayout-based layout - explicitly does not support being
+    intrinsically measured ("Asking for intrinsic measurements of
+    SubcomposeLayout layouts is not supported"). This is a known Compose
+    limitation (Google issue trackers 242101969 / 242398344), not something
+    fixable with a modifier tweak on the LazyColumn.
+
+    Real fix: keep the plain (non-lazy) Column that ExposedDropdownMenu
+    requires, but stop handing it hundreds of items. Every editable=true
+    FormDropdownField in this codebase (outboundTag, fallbackTag,
+    prevProfile/nextProfile, the proxy-chain member picker) is a
+    type-a-value-with-suggestions field, so filtering the suggestion list by
+    what's currently typed is correct UX, not just a perf hack. A hard cap
+    of 50 is the backstop for the unfiltered case (field is empty, list is
+    huge) - well under the ~100-item threshold where a plain Column starts
+    to visibly lag.
+
+    Idempotent against BOTH a pristine checkout and a tree that already has
+    the v1 LazyColumn attempt applied.
+    """
     p = BASE / "app/src/main/java/com/v2ray/ang/compose/FormFields.kt"
     if not p.exists():
         print("✗ FormFields.kt not found")
         return
     c = read(p)
 
+    # Remove lazy-only imports left over from a v1 run, if present.
+    for stale in (
+        "import androidx.compose.foundation.lazy.LazyColumn\n",
+        "import androidx.compose.foundation.lazy.items\n",
+        "import androidx.compose.foundation.lazy.rememberLazyListState\n",
+    ):
+        c = c.replace(stale, "")
+
     needed_imports = [
         "import androidx.compose.foundation.layout.heightIn",
-        "import androidx.compose.foundation.lazy.LazyColumn",
-        "import androidx.compose.foundation.lazy.items",
-        "import androidx.compose.foundation.lazy.rememberLazyListState",
+        "import androidx.compose.runtime.remember",
     ]
     last_import = re.search(r'^import .*$', c, re.MULTILINE)
     if last_import:
@@ -865,7 +894,39 @@ def patch_formfields():
             c = c[:pos] + "\n" + "\n".join(missing) + c[pos:]
             print(f"✓ FormFields: added {len(missing)} import(s)")
 
-    old_menu = '''        ExposedDropdownMenu(
+    # --- state: add the filtered/capped options list ---
+    old_state = '''    var expanded by rememberSaveable { mutableStateOf(false) }
+    val menuScrollState = rememberScrollState()
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current'''
+    new_state = '''    var expanded by rememberSaveable { mutableStateOf(false) }
+    val menuScrollState = rememberScrollState()
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    // ExposedDropdownMenu can't host a LazyColumn (it queries intrinsic
+    // measurements to size itself; SubcomposeLayout-backed lazy lists don't
+    // support that). Keep the required plain Column, but bound what it
+    // renders: filter by what's typed (every editable usage here is a
+    // suggestions-for-a-typed-value field) and cap the rest as a backstop.
+    val visibleOptions = remember(options, value, editable) {
+        val base = if (editable && value.isNotBlank()) {
+            options.filter { it.contains(value, ignoreCase = true) }
+        } else {
+            options
+        }
+        if (base.size > 50) base.take(50) else base
+    }'''
+    if "val visibleOptions = remember" in c:
+        print("• FormFields: filtered/capped options already present")
+    elif old_state in c:
+        c = c.replace(old_state, new_state, 1)
+        print("✓ FormFields: added typed-text filtering + 50-item cap")
+    else:
+        print("⚠ FormFields: could not find FormDropdownField state block — source may have changed")
+
+    # --- menu content: render visibleOptions instead of options ---
+    pristine_menu = '''        ExposedDropdownMenu(
             expanded = expanded,
             onDismissRequest = { expanded = false },
             modifier = Modifier.verticalScrollbar(menuScrollState),
@@ -883,7 +944,7 @@ def patch_formfields():
                 )
             }
         }'''
-    new_menu = '''        ExposedDropdownMenu(
+    lazy_menu_from_v1 = '''        ExposedDropdownMenu(
             expanded = expanded,
             onDismissRequest = { expanded = false },
             modifier = Modifier
@@ -911,11 +972,34 @@ def patch_formfields():
                 }
             }
         }'''
-    if "LazyColumn(" in c and "ExposedDropdownMenu" in c:
-        print("• FormFields: dropdown already lazy, skipping")
-    elif old_menu in c:
-        c = c.replace(old_menu, new_menu, 1)
-        print("✓ FormFields: dropdown now uses LazyColumn (fixes slowness + bounds height)")
+    new_menu = '''        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier
+                .verticalScrollbar(menuScrollState)
+                .heightIn(max = 300.dp),
+            scrollState = menuScrollState,
+            containerColor = MaterialTheme.colorScheme.surface
+        ) {
+            visibleOptions.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option) },
+                    onClick = {
+                        onValueChange(option)
+                        expanded = false
+                        focusManager.clearFocus()
+                    }
+                )
+            }
+        }'''
+    if "visibleOptions.forEach" in c:
+        print("• FormFields: dropdown menu already updated")
+    elif pristine_menu in c:
+        c = c.replace(pristine_menu, new_menu, 1)
+        print("✓ FormFields: dropdown menu now renders the filtered/capped list")
+    elif lazy_menu_from_v1 in c:
+        c = c.replace(lazy_menu_from_v1, new_menu, 1)
+        print("↺ FormFields: reverted the v1 LazyColumn attempt (crashes inside ExposedDropdownMenu) and switched to filtering")
     else:
         print("⚠ FormFields: could not find the ExposedDropdownMenu block — source may have changed")
 
