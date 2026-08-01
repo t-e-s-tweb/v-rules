@@ -868,7 +868,7 @@ def patch_formfields():
     Idempotent against BOTH a pristine checkout and a tree that already has
     the v1 LazyColumn attempt applied.
     """
-    p = BASE / "app/src/main/java/com/v2ray/ang/compose/FormFields.kt"
+    p = BASE / "app/src/main/java/com/v2ray/ang/ui/compose/FormFields.kt"
     if not p.exists():
         print("✗ FormFields.kt not found")
         return
