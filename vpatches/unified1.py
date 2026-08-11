@@ -1,31 +1,43 @@
 #!/usr/bin/env python3
 """
-Unified patcher - corrected version.
+Unified v2rayNG patcher - combined.
 
-Fixes two bugs from the previous version:
+One script, run once, that:
 
-1. DNS parallel-query / serve-stale toggles never reached the generated core
-   config. CoreConfigManager.kt has an OLD configureDns(v2rayConfig,
-   policyGroupBalancerTags) overload commented out (/* ... */) higher up in
-   the class, kept as dead-code reference, followed by the real
-   configureDns(configContext, v2rayConfig, policyGroupBalancerTags) that is
-   actually called from buildUnifiedConfig(). The old patcher used
-   c.find("private fun configureDns(") which matches the FIRST occurrence -
-   the commented-out one - so the "fix" was being written into a comment and
-   had zero effect on the compiled app. This version anchors on the live
-   method's unique signature instead. It also stopped mutating
-   `enableParallelQuery` after construction (that field is `val`, so
-   `dnsBean.enableParallelQuery = true` cannot compile) - values are computed
-   first and passed straight into the DnsBean constructor.
+  1-8. DNS parallel-query / serve-stale toggles + fast dropdown menus.
+       - configureDns(configContext, ...) is the function buildUnifiedConfig()
+         actually calls; an older configureDns(v2rayConfig, ...) sits above it
+         commented out as dead-code reference. The DNS-toggle prefs
+         (PREF_DNS_PARALLEL_QUERY / PREF_DNS_SERVE_STALE) get wired into
+         whichever of the two is live at the time this runs (see step 9).
+       - FormDropdownField's ExposedDropdownMenu renders every option through
+         a plain (non-lazy) Column, so a large suggestion list (e.g. every
+         server remark for the prevProfile/nextProfile chain pickers) visibly
+         lags when the menu opens. LazyColumn is not a fix here - Material3's
+         ExposedDropdownMenu sizes itself via intrinsic measurement, which
+         SubcomposeLayout-backed lazy lists don't support and crashes
+         ("Asking for intrinsic measurements of SubcomposeLayout layouts is
+         not supported"). Fixed instead by filtering the option list to what's
+         typed (every editable=true usage here is a type-a-value-with-
+         suggestions field) plus a hard cap of 50 as a backstop.
 
-2. The dropdown UI was slow because ExposedDropdownMenu's item list is a
-   plain (non-lazy) Column - every option is composed and measured the
-   instant the menu opens. That's invisible for small fixed lists (flow,
-   security, network) but the new prevProfile/nextProfile chain pickers feed
-   in every server remark across every subscription (potentially hundreds of
-   items), so opening the menu visibly hitches. Fixed by rendering options in
-   a LazyColumn instead, reusing the LazyListState overload of
-   verticalScrollbar that already exists in Scrollbar.kt.
+  9-11. Mirrors DHR60/v2rayNG@4ce36c0 ("Revert 'Improve DNS, try fix'"):
+       https://github.com/DHR60/v2rayNG/commit/4ce36c076237c6e08be03c5a652f320559a2ebe6
+       Removes the configContext/routingDomainRules-based DNS path
+       (configureDns(configContext, ...), buildDnsHostsFromRoutingRules,
+       buildDnsCnModeFromRoutingRules, buildDnsFromRoutingRules,
+       collectRoutingDomainRulesForDns(), CoreConfigContext.routingDomainRules)
+       and revives the simpler configureDns(v2rayConfig, policyGroupBalancerTags)
+       overload, carrying the DNS-toggle wiring from steps 1-8 over into it so
+       the revert doesn't silently undo that fix.
+
+Steps 1-8 run first regardless (they also patch files steps 9-11 don't touch:
+SubEditActivity.kt, strings.xml, SettingsActivity.kt, FormFields.kt). Step 9
+then wires the DNS toggle into whichever configureDns is live at that point -
+the one steps 1-8 just patched - before deleting it and reviving the old one.
+Every step is idempotent, so this script is safe to re-run on an
+already-patched tree (e.g. after pulling a fresh upstream checkout for
+unrelated changes).
 """
 
 import re
@@ -1007,14 +1019,212 @@ def patch_formfields():
 
 
 # ----------------------------------------------------------------------
+# 9. CoreConfigManager.kt - revert the configContext-based DNS path
+#    (mirrors DHR60/v2rayNG@4ce36c0) and revive the old configureDns, drop the
+#    configContext-based one + its 3 helpers, carry the DNS-toggle wiring
+#    over, and switch configureLocalDns back to the non-configContext form.
+# ----------------------------------------------------------------------
+def revert_coreconfigmanager():
+    p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
+    if not p.exists():
+        print("✗ CoreConfigManager.kt not found — skipping")
+        return
+    c = read(p)
+
+    if "private fun configureDns(\n        v2rayConfig: V2rayConfig," in c and \
+       "private fun configureDns(\n        configContext: CoreConfigContext," not in c:
+        print("• CoreConfigManager: DNS revert already applied, skipping")
+        return
+
+    backup_kotlin(p)
+
+    # --- call site: drop configContext from both calls ---
+    old_call = "configureDns(configContext, v2rayConfig, policyGroupBalancerTags)\n        configureLocalDns(configContext, v2rayConfig)"
+    new_call = "configureDns(v2rayConfig, policyGroupBalancerTags)\n        configureLocalDns(v2rayConfig)"
+    if old_call in c:
+        c = c.replace(old_call, new_call, 1)
+        print("✓ CoreConfigManager: updated buildUnifiedConfig call site")
+    else:
+        print("⚠ CoreConfigManager: configureDns/configureLocalDns call site not found as expected")
+
+    # --- configureLocalDns: signature + domain collection ---
+    old_sig = "private fun configureLocalDns(configContext: CoreConfigContext, v2rayConfig: V2rayConfig) {"
+    new_sig = "private fun configureLocalDns(v2rayConfig: V2rayConfig) {"
+    if old_sig in c:
+        c = c.replace(old_sig, new_sig, 1)
+        print("✓ CoreConfigManager: updated configureLocalDns signature")
+
+    old_domains = '''val geositeCn = arrayListOf(AppConfig.GEOSITE_CN)
+            val routingDomains = configContext.routingDomainRules
+                .asSequence()
+                .filter { it.outboundTag != AppConfig.TAG_BLOCKED }
+                .flatMap { it.domain.asSequence() }
+                .toList()
+                .distinct()
+            val finalDomain = geositeCn + routingDomains'''
+    new_domains = '''val geositeCn = arrayListOf(AppConfig.GEOSITE_CN)
+            val proxyDomain = collectUserRuleDomainsByTag(AppConfig.TAG_PROXY)
+            val directDomain = collectUserRuleDomainsByTag(AppConfig.TAG_DIRECT)
+            val finalDomain = geositeCn.plus(proxyDomain).plus(directDomain).distinct()'''
+    if old_domains in c:
+        c = c.replace(old_domains, new_domains, 1)
+        print("✓ CoreConfigManager: configureLocalDns now collects domains via collectUserRuleDomainsByTag")
+    else:
+        print("⚠ CoreConfigManager: configureLocalDns domain-collection block not found as expected")
+
+    # --- revive the old configureDns, delete the configContext-based one + its 3 helpers ---
+    dead_open_anchor = (
+        "\n    /*\n    /**\n     * Configure DNS servers, hosts, and DNS routing rules.\n"
+        "     */\n    private fun configureDns(\n        v2rayConfig: V2rayConfig,\n"
+        "        policyGroupBalancerTags: Map<String, String>,\n    ) {"
+    )
+    transition_anchor = (
+        "\n    */\n\n    /**\n     * Configure DNS servers, hosts, and DNS routing rules.\n"
+        "     */\n    private fun configureDns(\n        configContext: CoreConfigContext,"
+    )
+    dead_open_idx = c.find(dead_open_anchor)
+    if dead_open_idx == -1:
+        print("⚠ CoreConfigManager: commented-out configureDns(v2rayConfig, ...) not found — already reverted, or source has drifted")
+    else:
+        transition_idx = c.find(transition_anchor, dead_open_idx)
+        end_idx = c.find("\n\n    //endregion", transition_idx) if transition_idx != -1 else -1
+        if transition_idx == -1 or end_idx == -1:
+            print("⚠ CoreConfigManager: could not locate the end of the configContext-based DNS block — source has drifted, check manually")
+        else:
+            dead_body = c[dead_open_idx + len(dead_open_anchor): transition_idx]
+
+            # carry the DNS-toggle wiring over (same transformation patch_fixed.py applied)
+            old_dns_construction = '''v2rayConfig.dns = V2rayConfig.DnsBean(
+            servers = servers,
+            hosts = hosts,
+            tag = AppConfig.TAG_DNS,
+            enableParallelQuery = if ((domesticDns.size + remoteDns.size) > 2) true else null
+        )'''
+            new_dns_construction = '''val dnsParallelQueryEnabled = MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_PARALLEL_QUERY, false)
+        val dnsServeStaleEnabled = MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_SERVE_STALE, false)
+
+        v2rayConfig.dns = V2rayConfig.DnsBean(
+            servers = servers,
+            hosts = hosts,
+            tag = AppConfig.TAG_DNS,
+            enableParallelQuery = if (dnsParallelQueryEnabled) true else null,
+            serveStale = if (dnsServeStaleEnabled) true else null
+        )'''
+            if old_dns_construction in dead_body:
+                dead_body = dead_body.replace(old_dns_construction, new_dns_construction, 1)
+                print("✓ CoreConfigManager: carried DNS parallel-query/serve-stale wiring into the revived configureDns")
+            else:
+                print("⚠ CoreConfigManager: DnsBean construction not found in the revived body — DNS toggle wiring NOT carried over, check manually")
+
+            revived_function = (
+                "\n    /**\n     * Configure DNS servers, hosts, and DNS routing rules.\n     */\n"
+                "    private fun configureDns(\n        v2rayConfig: V2rayConfig,\n"
+                "        policyGroupBalancerTags: Map<String, String>,\n    ) {" + dead_body
+            )
+            c = c[:dead_open_idx] + revived_function + c[end_idx:]
+            print("✓ CoreConfigManager: revived configureDns(v2rayConfig, policyGroupBalancerTags) and removed the configContext-based DNS block (+3 helpers)")
+
+    write(p, c)
+
+
+# ----------------------------------------------------------------------
+# 10. CoreConfigContextBuilder.kt - stop collecting/passing routingDomainRules
+# ----------------------------------------------------------------------
+def revert_coreconfigcontextbuilder():
+    p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigContextBuilder.kt"
+    if not p.exists():
+        print("✗ CoreConfigContextBuilder.kt not found — skipping")
+        return
+    c = read(p)
+
+    if "collectRoutingDomainRulesForDns" not in c:
+        print("• CoreConfigContextBuilder: DNS revert already applied, skipping")
+        return
+
+    old_build_lines = "        val routingDomainRules = collectRoutingDomainRulesForDns()\n\n        return CoreConfigContext("
+    new_build_lines = "        return CoreConfigContext("
+    if old_build_lines in c:
+        c = c.replace(old_build_lines, new_build_lines, 1)
+        print("✓ CoreConfigContextBuilder: stopped collecting routingDomainRules in build()")
+    else:
+        print("⚠ CoreConfigContextBuilder: routingDomainRules collection line not found as expected")
+
+    old_arg = "            routingDomainRules = routingDomainRules,\n"
+    if old_arg in c:
+        c = c.replace(old_arg, "", 1)
+        print("✓ CoreConfigContextBuilder: stopped passing routingDomainRules into CoreConfigContext(...)")
+    else:
+        print("⚠ CoreConfigContextBuilder: routingDomainRules argument not found as expected")
+
+    method_start = c.find("    /**\n     * Collect enabled routing domain rules in original order for DNS segmentation.")
+    if method_start != -1:
+        open_brace = c.find("private fun collectRoutingDomainRulesForDns", method_start)
+        open_brace = c.find('{', open_brace)
+        brace_count = 1
+        i = open_brace + 1
+        while i < len(c) and brace_count > 0:
+            if c[i] == '{':
+                brace_count += 1
+            elif c[i] == '}':
+                brace_count -= 1
+            i += 1
+        if brace_count == 0:
+            c = c[:method_start] + c[i:]
+            print("✓ CoreConfigContextBuilder: removed collectRoutingDomainRulesForDns()")
+        else:
+            print("⚠ CoreConfigContextBuilder: brace mismatch removing collectRoutingDomainRulesForDns — check manually")
+    else:
+        print("⚠ CoreConfigContextBuilder: collectRoutingDomainRulesForDns() not found as expected")
+
+    write(p, c)
+
+
+# ----------------------------------------------------------------------
+# 11. CoreConfigContext.kt - drop the routingDomainRules field + nested type
+# ----------------------------------------------------------------------
+def revert_coreconfigcontext():
+    p = BASE / "app/src/main/java/com/v2ray/ang/dto/CoreConfigContext.kt"
+    if not p.exists():
+        print("✗ CoreConfigContext.kt not found — skipping")
+        return
+    c = read(p)
+
+    if "routingDomainRules" not in c:
+        print("• CoreConfigContext: DNS revert already applied, skipping")
+        return
+
+    old_field = "    val routingDomainRules: List<RoutingDomainRule> = emptyList(),\n"
+    if old_field in c:
+        c = c.replace(old_field, "", 1)
+        print("✓ CoreConfigContext: removed routingDomainRules field")
+    else:
+        print("⚠ CoreConfigContext: routingDomainRules field not found as expected")
+
+    old_nested_type = '''
+    data class RoutingDomainRule(
+        val domain: List<String>,
+        val outboundTag: String,
+    )
+'''
+    if old_nested_type in c:
+        c = c.replace(old_nested_type, "", 1)
+        print("✓ CoreConfigContext: removed RoutingDomainRule data class")
+    else:
+        print("⚠ CoreConfigContext: RoutingDomainRule data class not found as expected")
+
+    write(p, c)
+
+
+# ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
 def main():
     print("=" * 70)
-    print("Unified Patcher – corrected (DNS prefs + fast dropdown)")
+    print("Unified Patcher - DNS prefs + fast dropdown + DHR60 DNS revert")
     print("=" * 70)
 
     try:
+        # DNS toggle + dropdown fixes
         patch_appconfig()
         patch_v2rayconfig()
         patch_subedit()
@@ -1023,6 +1233,12 @@ def main():
         patch_coreconfigmanager()
         patch_settings()
         patch_formfields()
+
+        # DHR60-style DNS revert (must run after the above - see module docstring)
+        revert_coreconfigmanager()
+        revert_coreconfigcontextbuilder()
+        revert_coreconfigcontext()
+
         print("\n✅ All patches applied successfully.")
         print("👉 Rebuild and test.")
     except Exception as e:
