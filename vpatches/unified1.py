@@ -1,43 +1,14 @@
 #!/usr/bin/env python3
 """
-Unified v2rayNG patcher - combined.
+Minimal v2rayNG patcher – only:
 
-One script, run once, that:
+  • DNS Parallel Query + Serve Stale toggles
+  • FormFields dropdown performance (typed filter + 50-item hard cap)
 
-  1-8. DNS parallel-query / serve-stale toggles + fast dropdown menus.
-       - configureDns(configContext, ...) is the function buildUnifiedConfig()
-         actually calls; an older configureDns(v2rayConfig, ...) sits above it
-         commented out as dead-code reference. The DNS-toggle prefs
-         (PREF_DNS_PARALLEL_QUERY / PREF_DNS_SERVE_STALE) get wired into
-         whichever of the two is live at the time this runs (see step 9).
-       - FormDropdownField's ExposedDropdownMenu renders every option through
-         a plain (non-lazy) Column, so a large suggestion list (e.g. every
-         server remark for the prevProfile/nextProfile chain pickers) visibly
-         lags when the menu opens. LazyColumn is not a fix here - Material3's
-         ExposedDropdownMenu sizes itself via intrinsic measurement, which
-         SubcomposeLayout-backed lazy lists don't support and crashes
-         ("Asking for intrinsic measurements of SubcomposeLayout layouts is
-         not supported"). Fixed instead by filtering the option list to what's
-         typed (every editable=true usage here is a type-a-value-with-
-         suggestions field) plus a hard cap of 50 as a backstop.
+Skips: CURRENT_SERVER / chain helpers, custom outbound injection,
+       DHR60 configContext DNS revert, etc.
 
-  9-11. Mirrors DHR60/v2rayNG@4ce36c0 ("Revert 'Improve DNS, try fix'"):
-       https://github.com/DHR60/v2rayNG/commit/4ce36c076237c6e08be03c5a652f320559a2ebe6
-       Removes the configContext/routingDomainRules-based DNS path
-       (configureDns(configContext, ...), buildDnsHostsFromRoutingRules,
-       buildDnsCnModeFromRoutingRules, buildDnsFromRoutingRules,
-       collectRoutingDomainRulesForDns(), CoreConfigContext.routingDomainRules)
-       and revives the simpler configureDns(v2rayConfig, policyGroupBalancerTags)
-       overload, carrying the DNS-toggle wiring from steps 1-8 over into it so
-       the revert doesn't silently undo that fix.
-
-Steps 1-8 run first regardless (they also patch files steps 9-11 don't touch:
-SubEditActivity.kt, strings.xml, SettingsActivity.kt, FormFields.kt). Step 9
-then wires the DNS toggle into whichever configureDns is live at that point -
-the one steps 1-8 just patched - before deleting it and reviving the old one.
-Every step is idempotent, so this script is safe to re-run on an
-already-patched tree (e.g. after pulling a fresh upstream checkout for
-unrelated changes).
+Idempotent.
 """
 
 import re
@@ -63,54 +34,42 @@ def write(p, s):
 
 
 # ----------------------------------------------------------------------
-# 1. AppConfig.kt - add CURRENT_SERVER + DNS prefs
+# 1. AppConfig.kt – DNS prefs only
 # ----------------------------------------------------------------------
 def patch_appconfig():
     p = BASE / "app/src/main/java/com/v2ray/ang/AppConfig.kt"
+    if not p.exists():
+        print("✗ AppConfig.kt not found")
+        return
     c = read(p)
 
-    if '"__CURRENT_SERVER__"' not in c:
-        marker = "    val BUILTIN_OUTBOUND_TAGS = setOf("
-        if marker in c:
-            insert_pos = c.find(marker) + len(marker)
-            brace_count = 1
-            i = insert_pos
-            while i < len(c) and brace_count > 0:
-                if c[i] == '(':
-                    brace_count += 1
-                elif c[i] == ')':
-                    brace_count -= 1
-                i += 1
-            const_line = "\n    const val CURRENT_SERVER = \"__CURRENT_SERVER__\""
-            c = c[:i] + const_line + c[i:]
-            print("✓ AppConfig: added CURRENT_SERVER")
-        else:
-            last_brace = c.rfind('}')
-            if last_brace != -1:
-                c = c[:last_brace] + "\n    const val CURRENT_SERVER = \"__CURRENT_SERVER__\"\n" + c[last_brace:]
-                print("✓ AppConfig: added CURRENT_SERVER (fallback)")
+    if "PREF_DNS_PARALLEL_QUERY" in c and "PREF_DNS_SERVE_STALE" in c:
+        print("• AppConfig: DNS prefs already present")
+        return
 
-    if "PREF_DNS_PARALLEL_QUERY" not in c:
-        old = "    const val PREF_DNS_HOSTS = \"pref_dns_hosts\""
-        new = '''    const val PREF_DNS_HOSTS = "pref_dns_hosts"
+    old = '    const val PREF_DNS_HOSTS = "pref_dns_hosts"'
+    new = '''    const val PREF_DNS_HOSTS = "pref_dns_hosts"
     const val PREF_DNS_PARALLEL_QUERY = "pref_dns_parallel_query"
     const val PREF_DNS_SERVE_STALE = "pref_dns_serve_stale"'''
-        if old in c:
-            c = c.replace(old, new, 1)
-            print("✓ AppConfig: added DNS parallel/stale prefs")
-        else:
-            print("⚠ AppConfig: PREF_DNS_HOSTS not found, skipping DNS prefs")
-
+    if old in c:
+        c = c.replace(old, new, 1)
+        print("✓ AppConfig: added PREF_DNS_PARALLEL_QUERY + PREF_DNS_SERVE_STALE")
+    else:
+        print("⚠ AppConfig: PREF_DNS_HOSTS not found, skipping DNS prefs")
+        return
     write(p, c)
 
 
 # ----------------------------------------------------------------------
-# 2. V2rayConfig.kt - add serveStale to DnsBean
+# 2. V2rayConfig.kt – add serveStale to DnsBean
 # ----------------------------------------------------------------------
 def patch_v2rayconfig():
     p = BASE / "app/src/main/java/com/v2ray/ang/dto/V2rayConfig.kt"
+    if not p.exists():
+        print("✗ V2rayConfig.kt not found")
+        return
     c = read(p)
-    if "var serveStale" in c:
+    if "var serveStale" in c or "val serveStale" in c:
         print("• V2rayConfig: serveStale already present")
         return
 
@@ -137,589 +96,119 @@ def patch_v2rayconfig():
         c = c.replace(old_dns, new_dns, 1)
         print("✓ V2rayConfig: added serveStale to DnsBean")
     else:
-        print("⚠ V2rayConfig: DnsBean not found, skipping")
+        # more tolerant match
+        m = re.search(
+            r'data class DnsBean\s*\(\s*'
+            r'var servers:.*?'
+            r'val enableParallelQuery: Boolean\? = null,\s*'
+            r'val tag: String\? = null\s*'
+            r'\)',
+            c, re.DOTALL
+        )
+        if m:
+            replacement = m.group(0).rstrip()[:-1] + ',\n        var serveStale: Boolean? = null\n    )'
+            c = c[:m.start()] + replacement + c[m.end():]
+            print("✓ V2rayConfig: added serveStale (regex)")
+        else:
+            print("⚠ V2rayConfig: DnsBean not found, skipping")
+            return
     write(p, c)
 
 
 # ----------------------------------------------------------------------
-# 3. SubEditActivity.kt - Compose version: add "None" and "[Current Server]"
-# ----------------------------------------------------------------------
-def patch_subedit():
-    p = BASE / "app/src/main/java/com/v2ray/ang/ui/subscription/SubEditActivity.kt"
-    if not p.exists():
-        print("✗ SubEditActivity.kt not found – skipping")
-        return
-    c = read(p)
-
-    old_suggestions = "profileSuggestions = suggestions"
-    if old_suggestions in c:
-        new_suggestions = '''profileSuggestions = listOf("None", "[Current Server]") + suggestions'''
-        c = c.replace(old_suggestions, new_suggestions, 1)
-        print("✓ SubEditActivity: added special items to suggestions")
-    else:
-        print("⚠ SubEditActivity: profileSuggestions line not found")
-
-    old_load_prev = "var prevProfile by rememberSaveable { mutableStateOf(initial.prevProfile ?: \"\") }"
-    new_load_prev = '''    var prevProfile by rememberSaveable { mutableStateOf(
-        when (initial.prevProfile) {
-            "" -> "None"
-            AppConfig.CURRENT_SERVER -> "[Current Server]"
-            else -> initial.prevProfile ?: ""
-        }
-    ) }'''
-    if "var prevProfile by rememberSaveable" in c:
-        c = c.replace(old_load_prev, new_load_prev, 1)
-        print("✓ SubEditActivity: updated prevProfile loading")
-    else:
-        print("⚠ SubEditActivity: prevProfile loading not found")
-
-    old_load_next = "var nextProfile by rememberSaveable { mutableStateOf(initial.nextProfile ?: \"\") }"
-    new_load_next = '''    var nextProfile by rememberSaveable { mutableStateOf(
-        when (initial.nextProfile) {
-            "" -> "None"
-            AppConfig.CURRENT_SERVER -> "[Current Server]"
-            else -> initial.nextProfile ?: ""
-        }
-    ) }'''
-    if "var nextProfile by rememberSaveable" in c:
-        c = c.replace(old_load_next, new_load_next, 1)
-        print("✓ SubEditActivity: updated nextProfile loading")
-
-    old_save_prev = "subItem.prevProfile = prevProfile"
-    new_save_prev = '''        subItem.prevProfile = when (prevProfile) {
-            "None" -> ""
-            "[Current Server]" -> AppConfig.CURRENT_SERVER
-            else -> prevProfile
-        }'''
-    if "subItem.prevProfile = prevProfile" in c:
-        c = c.replace(old_save_prev, new_save_prev, 1)
-        print("✓ SubEditActivity: updated prevProfile saving")
-
-    old_save_next = "subItem.nextProfile = nextProfile"
-    new_save_next = '''        subItem.nextProfile = when (nextProfile) {
-            "None" -> ""
-            "[Current Server]" -> AppConfig.CURRENT_SERVER
-            else -> nextProfile
-        }'''
-    if "subItem.nextProfile = nextProfile" in c:
-        c = c.replace(old_save_next, new_save_next, 1)
-        print("✓ SubEditActivity: updated nextProfile saving")
-
-    write(p, c)
-
-
-# ----------------------------------------------------------------------
-# 4. strings.xml - add all needed strings
+# 3. strings.xml – only the two DNS strings
 # ----------------------------------------------------------------------
 def patch_strings():
     p = BASE / "app/src/main/res/values/strings.xml"
+    if not p.exists():
+        print("✗ strings.xml not found")
+        return
     c = read(p)
 
-    new_strings = []
     needed = {
-        "sub_setting_none": "None",
-        "sub_setting_current_server": "[Current Server]",
         "title_pref_dns_parallel_query": "DNS Parallel Query",
         "summary_pref_dns_parallel_query": "Enable parallel queries to all DNS servers for faster resolution",
         "title_pref_dns_serve_stale": "DNS Serve Stale",
         "summary_pref_dns_serve_stale": "Serve stale DNS records while refreshing in background",
     }
+    new_strings = []
     for k, v in needed.items():
         if f'name="{k}"' in c:
             continue
         new_strings.append(f'    <string name="{k}">{v}</string>')
 
-    if new_strings:
-        m = re.search(r'(\s*)</resources>', c, re.IGNORECASE)
-        if m:
-            indent, pos = m.group(1), m.start()
-            insertion = "\n" + "\n".join(new_strings) + "\n" + indent
-            c = c[:pos] + insertion + c[pos:]
-            write(p, c)
-            print(f"✓ strings.xml: added {len(new_strings)} strings")
-        else:
-            print("⚠ strings.xml: </resources> not found")
-    else:
-        print("• strings.xml: all strings already present")
-
-
-# ----------------------------------------------------------------------
-# 5. CoreConfigContextBuilder.kt - add resolveCurrentServer helper
-# ----------------------------------------------------------------------
-def patch_coreconfigcontextbuilder():
-    p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigContextBuilder.kt"
-    if not p.exists():
-        print("✗ CoreConfigContextBuilder.kt not found – skipping")
+    if not new_strings:
+        print("• strings.xml: DNS strings already present")
         return
-    c = read(p)
 
-    if "private fun resolveCurrentServer" not in c:
-        lines = c.splitlines()
-        for i in range(len(lines) - 1, -1, -1):
-            if lines[i].strip() == '}':
-                helper = [
-                    "",
-                    "    /**",
-                    "     * Resolves [Current Server] placeholder to the actual selected server's remark.",
-                    "     */",
-                    "    private fun resolveCurrentServer(remark: String?): String? {",
-                    "        if (remark == AppConfig.CURRENT_SERVER) {",
-                    "            val currId = MmkvManager.getSelectServer()",
-                    "            if (!currId.isNullOrEmpty()) {",
-                    "                val profile = MmkvManager.decodeServerConfig(currId)",
-                    "                return profile?.remarks",
-                    "            }",
-                    "        }",
-                    "        return remark",
-                    "    }",
-                ]
-                lines[i:i] = helper
-                c = '\n'.join(lines)
-                print("✓ CoreConfigContextBuilder: added resolveCurrentServer")
-                break
-
-    old_chain = '''    private fun resolveProxyChainProfilesFromGroup(config: ProfileItem): List<ProfileItem> {
-        if (config.subscriptionId.isEmpty()) {
-            return listOf(config)
-        }
-
-        try {
-            val subItem = MmkvManager.decodeSubscription(config.subscriptionId) ?: return listOf(config)
-            val resolved = mutableListOf<ProfileItem>()
-            SettingsManager.getServerViaRemarks(subItem.nextProfile)?.let { resolved.add(it) }
-            resolved.add(config)
-            SettingsManager.getServerViaRemarks(subItem.prevProfile)?.let { resolved.add(it) }
-            return resolved
-        } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "Failed to resolve proxy chain from group for '${config.remarks}'", e)
-            return listOf(config)
-        }
-    }'''
-    new_chain = '''    private fun resolveProxyChainProfilesFromGroup(config: ProfileItem): List<ProfileItem> {
-        if (config.subscriptionId.isEmpty()) {
-            return listOf(config)
-        }
-
-        try {
-            val subItem = MmkvManager.decodeSubscription(config.subscriptionId) ?: return listOf(config)
-            val resolved = mutableListOf<ProfileItem>()
-            resolveCurrentServer(subItem.nextProfile)?.let { remark ->
-                SettingsManager.getServerViaRemarks(remark)?.let { resolved.add(it) }
-            }
-            resolved.add(config)
-            resolveCurrentServer(subItem.prevProfile)?.let { remark ->
-                SettingsManager.getServerViaRemarks(remark)?.let { resolved.add(it) }
-            }
-            return resolved
-        } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "Failed to resolve proxy chain from group for '${config.remarks}'", e)
-            return listOf(config)
-        }
-    }'''
-    if old_chain in c:
-        c = c.replace(old_chain, new_chain, 1)
-        print("✓ CoreConfigContextBuilder: updated resolveProxyChainProfilesFromGroup")
+    m = re.search(r'(\s*)</resources>', c, re.IGNORECASE)
+    if m:
+        indent, pos = m.group(1), m.start()
+        insertion = "\n" + "\n".join(new_strings) + "\n" + indent
+        c = c[:pos] + insertion + c[pos:]
+        write(p, c)
+        print(f"✓ strings.xml: added {len(new_strings)} DNS strings")
     else:
-        print("⚠ CoreConfigContextBuilder: resolveProxyChainProfilesFromGroup not found")
-
-    write(p, c)
+        print("⚠ strings.xml: </resources> not found")
 
 
 # ----------------------------------------------------------------------
-# 6. CoreConfigManager.kt
+# 4. CoreConfigManager.kt – wire prefs into whichever configureDns is live
 # ----------------------------------------------------------------------
-def patch_coreconfigmanager():
+def patch_coreconfigmanager_dns():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
     if not p.exists():
-        print("✗ CoreConfigManager.kt not found – skipping")
+        print("✗ CoreConfigManager.kt not found")
         return
-    backup_kotlin(p)
     c = read(p)
 
-    # 6.1 Add missing import
-    if "import com.v2ray.ang.dto.entities.SubscriptionItem" not in c:
-        last_import = re.search(r'^import .*$', c, re.MULTILINE)
-        if last_import:
-            pos = last_import.end()
-            c = c[:pos] + "\nimport com.v2ray.ang.dto.entities.SubscriptionItem" + c[pos:]
-            print("✓ CoreConfigManager: added import SubscriptionItem")
-        else:
-            print("⚠ CoreConfigManager: could not find import block")
+    # Prefer the live configContext-based one; fall back to the plain one
+    live_sig = "private fun configureDns(\n        configContext: CoreConfigContext,"
+    plain_sig = "private fun configureDns(\n        v2rayConfig: V2rayConfig,"
 
-    # 6.2 Add helper functions before the final '}'
-    helpers = r'''
-    // ------------------------------------------------------------------
-    // Custom outbound injection with chain proxy support
-    // ------------------------------------------------------------------
-
-    private fun getCurrentMainServerRemarks(): String? {
-        val currId = MmkvManager.getSelectServer()
-        return if (!currId.isNullOrEmpty()) {
-            MmkvManager.decodeServerConfig(currId)?.remarks?.trim()
-        } else null
-    }
-
-    private fun resolveCurrentServer(remark: String?): String? {
-        if (remark == AppConfig.CURRENT_SERVER) {
-            val currId = MmkvManager.getSelectServer()
-            if (!currId.isNullOrEmpty()) {
-                val profile = MmkvManager.decodeServerConfig(currId)
-                return profile?.remarks
-            }
-        }
-        return remark
-    }
-
-    private fun injectCustomOutbounds(v2rayConfig: V2rayConfig) {
-        val existingTags = v2rayConfig.outbounds.mapTo(mutableSetOf()) { it.tag }
-        val outboundTagMap = mutableMapOf<String, String>()
-
-        val rulesetItems = MmkvManager.decodeRoutingRulesets() ?: return
-        val customOutboundTags = rulesetItems
-            .filter { it.enabled && !AppConfig.BUILTIN_OUTBOUND_TAGS.contains(it.outboundTag) }
-            .map { it.outboundTag }
-            .distinct()
-        LogUtil.d(AppConfig.TAG, "🎯 Custom outbound tags from routing rules: $customOutboundTags")
-
-        for (tag in customOutboundTags) {
-            if (tag in existingTags) {
-                LogUtil.d(AppConfig.TAG, "⏩ Custom outbound '$tag' already injected, skipping")
-                continue
-            }
-            val profile = SettingsManager.getServerViaRemarks(tag) ?: run {
-                LogUtil.w(AppConfig.TAG, "⚠️ No profile found for custom outbound tag '$tag'")
-                continue
-            }
-            val outbound = convertProfile2Outbound(profile) ?: run {
-                LogUtil.w(AppConfig.TAG, "⚠️ Failed to convert profile for '$tag' to outbound")
-                continue
-            }
-            outbound.tag = tag
-
-            applySubscriptionChain(v2rayConfig, profile, outbound, outboundTagMap, existingTags)
-
-            v2rayConfig.outbounds.add(outbound)
-            existingTags.add(tag)
-            outboundTagMap[tag] = tag
-            LogUtil.d(AppConfig.TAG, "✅ Injected custom outbound '$tag'")
-        }
-    }
-
-    private fun applySubscriptionChain(
-        v2rayConfig: V2rayConfig,
-        profile: ProfileItem,
-        outbound: V2rayConfig.OutboundBean,
-        outboundTagMap: MutableMap<String, String>,
-        existingTags: MutableSet<String>
-    ) {
-        var subItem: SubscriptionItem? = null
-
-        if (!profile.subscriptionId.isNullOrEmpty()) {
-            subItem = MmkvManager.decodeSubscription(profile.subscriptionId)
-        }
-
-        if (subItem == null) {
-            LogUtil.d(AppConfig.TAG, "⚠️ No subscription for profile '${profile.remarks}', cannot apply chain")
+    method_start = c.find(live_sig)
+    if method_start == -1:
+        method_start = c.find(plain_sig)
+        if method_start == -1:
+            print("⚠ CoreConfigManager: no configureDns found")
             return
-        }
-
-        val originalTag = outbound.tag
-        LogUtil.d(AppConfig.TAG, "🔗 Applying chain for '$originalTag' using subscription ${subItem.remarks}")
-        LogUtil.d(AppConfig.TAG, "   prevProfile='${subItem.prevProfile}', nextProfile='${subItem.nextProfile}'")
-
-        val currentMainRemarks = getCurrentMainServerRemarks()
-        LogUtil.d(AppConfig.TAG, "   Current main server remarks: '$currentMainRemarks'")
-
-        fun addChainOutbound(
-            targetRemark: String?,
-            chainType: String,
-            desiredTag: String,
-            chainTo: (V2rayConfig.OutboundBean) -> Unit
-        ) {
-            val resolvedRemark = resolveCurrentServer(targetRemark)?.trim()
-            if (resolvedRemark.isNullOrEmpty()) {
-                LogUtil.d(AppConfig.TAG, "⚠️ $chainType target is empty or None, skipping")
-                return
-            }
-
-            LogUtil.d(AppConfig.TAG, "   $chainType resolved remark: '$resolvedRemark'")
-
-            val isCurrentMain = currentMainRemarks != null && resolvedRemark.equals(currentMainRemarks, ignoreCase = true)
-
-            // For prev chain: if main server, reuse "proxy" directly
-            if (chainType == "prev" && isCurrentMain) {
-                LogUtil.d(AppConfig.TAG, "✅ Prev target is main server – setting dialerProxy to '${AppConfig.TAG_PROXY}'")
-                outbound.ensureSockopt().dialerProxy = AppConfig.TAG_PROXY
-                return
-            }
-
-            // For next chain (or prev when not main): create numbered outbound
-            val existingByTag = v2rayConfig.outbounds.firstOrNull { it.tag == desiredTag }
-            if (existingByTag != null) {
-                chainTo(existingByTag)
-                outboundTagMap["$chainType-$resolvedRemark"] = desiredTag
-                LogUtil.d(AppConfig.TAG, "♻️ Reused existing $chainType outbound: $desiredTag")
-                return
-            }
-
-            val mapKey = "$chainType-$resolvedRemark"
-            val existingTag = outboundTagMap[mapKey]
-            if (existingTag != null) {
-                val existingOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == existingTag }
-                if (existingOutbound != null) {
-                    chainTo(existingOutbound)
-                    LogUtil.d(AppConfig.TAG, "♻️ Reused $chainType outbound from map: $existingTag")
-                    return
-                }
-            }
-
-            val chainProfile = SettingsManager.getServerViaRemarks(resolvedRemark)
-            if (chainProfile == null) {
-                LogUtil.w(AppConfig.TAG, "❌ No profile found for $chainType remark '$resolvedRemark'")
-                return
-            }
-
-            val chainOutbound = convertProfile2Outbound(chainProfile)
-            if (chainOutbound == null) {
-                LogUtil.w(AppConfig.TAG, "❌ Failed to convert $chainType profile '$resolvedRemark' to outbound")
-                return
-            }
-            chainOutbound.tag = desiredTag
-            outboundTagMap[mapKey] = desiredTag
-
-            chainTo(chainOutbound)
-            v2rayConfig.outbounds.add(chainOutbound)
-            existingTags.add(desiredTag)
-            LogUtil.d(AppConfig.TAG, "✅ Created new $chainType outbound: $desiredTag")
-        }
-
-        // Handle prev hop (may reuse "proxy" if main server)
-        addChainOutbound(subItem.prevProfile, "prev", "$originalTag-prev") { prevOutbound ->
-            outbound.ensureSockopt().dialerProxy = prevOutbound.tag
-            LogUtil.d(AppConfig.TAG, "🔗 Wired prev: ${outbound.tag}.dialerProxy = ${prevOutbound.tag}")
-        }
-
-        // Handle next hop – always create a numbered outbound
-        if (!subItem.nextProfile.isNullOrEmpty()) {
-            val nextTag = "${AppConfig.TAG_PROXY}-${originalTag}-1"
-            addChainOutbound(subItem.nextProfile, "next", nextTag) { nextOutbound ->
-                outbound.ensureSockopt().dialerProxy = nextOutbound.tag
-                LogUtil.d(AppConfig.TAG, "🔗 Wired next: ${outbound.tag}.dialerProxy = ${nextOutbound.tag}")
-            }
-        } else {
-            LogUtil.d(AppConfig.TAG, "ℹ️ No nextProfile configured, skipping next hop")
-        }
-    }
-'''
-    if "private fun getCurrentMainServerRemarks()" not in c:
-        lines = c.splitlines()
-        for i in range(len(lines)-1, -1, -1):
-            if lines[i].strip() == '}':
-                lines[i:i] = helpers.splitlines()
-                c = '\n'.join(lines)
-                print("✓ CoreConfigManager: added helper functions")
-                break
-
-    # 6.3 Modify buildUnifiedConfig to call injectCustomOutbounds
-    if "injectCustomOutbounds(v2rayConfig)" not in c:
-        pattern = r'(\s+)configureRouting\(configContext, v2rayConfig, policyGroupBalancerTags\)'
-        replacement = r'\1injectCustomOutbounds(v2rayConfig)\n\1configureRouting(configContext, v2rayConfig, policyGroupBalancerTags)'
-        c = re.sub(pattern, replacement, c, count=1)
-        print("✓ CoreConfigManager: added injectCustomOutbounds call")
-
-    # 6.4 Update buildOutbounds signature and call
-    old_build_outbounds = '''    private fun buildOutbounds(
-        resolvedOutbound: CoreConfigContext.ResolvedOutbound,
-        prepend: Boolean,
-        existingTags: MutableSet<String>,
-        v2rayConfig: V2rayConfig,
-        policyGroupBalancerTags: MutableMap<String, String>,
-        balancerStrategies: MutableList<BalancerStrategy>,
-    )'''
-    new_build_outbounds = '''    private fun buildOutbounds(
-        resolvedOutbound: CoreConfigContext.ResolvedOutbound,
-        prepend: Boolean,
-        existingTags: MutableSet<String>,
-        v2rayConfig: V2rayConfig,
-        policyGroupBalancerTags: MutableMap<String, String>,
-        balancerStrategies: MutableList<BalancerStrategy>,
-        outboundTagMap: MutableMap<String, String> = mutableMapOf(),
-    )'''
-    if old_build_outbounds in c:
-        c = c.replace(old_build_outbounds, new_build_outbounds, 1)
-        print("✓ CoreConfigManager: updated buildOutbounds signature")
+        print("• CoreConfigManager: using plain configureDns(v2rayConfig, …)")
     else:
-        print("⚠ CoreConfigManager: buildOutbounds signature not found")
+        print("• CoreConfigManager: using live configureDns(configContext, …)")
 
-    old_call = '''            CoreResolvedType.PROXYCHAIN -> handleProxyChainResolvedOutbound(
-                resolvedOutbound = resolvedOutbound,
-                prepend = prepend,
-                existingTags = existingTags,
-                v2rayConfig = v2rayConfig,
-            )'''
-    new_call = '''            CoreResolvedType.PROXYCHAIN -> handleProxyChainResolvedOutbound(
-                resolvedOutbound = resolvedOutbound,
-                prepend = prepend,
-                existingTags = existingTags,
-                v2rayConfig = v2rayConfig,
-                outboundTagMap = outboundTagMap,
-            )'''
-    if old_call in c:
-        c = c.replace(old_call, new_call, 1)
-        print("✓ CoreConfigManager: updated handleProxyChainResolvedOutbound call")
-    else:
-        print("⚠ CoreConfigManager: call not found")
+    open_brace = c.find('{', method_start)
+    if open_brace == -1:
+        print("⚠ CoreConfigManager: no opening brace for configureDns")
+        return
 
-    # 6.5 Replace handleProxyChainResolvedOutbound body
-    method_start = c.find("private fun handleProxyChainResolvedOutbound")
-    if method_start != -1:
-        open_brace = c.find('{', method_start)
-        if open_brace != -1:
-            brace_count = 1
-            i = open_brace + 1
-            while i < len(c) and brace_count > 0:
-                if c[i] == '{':
-                    brace_count += 1
-                elif c[i] == '}':
-                    brace_count -= 1
-                i += 1
-            if brace_count == 0:
-                new_signature = '''private fun handleProxyChainResolvedOutbound(
-        resolvedOutbound: CoreConfigContext.ResolvedOutbound,
-        prepend: Boolean,
-        existingTags: MutableSet<String>,
-        v2rayConfig: V2rayConfig,
-        outboundTagMap: MutableMap<String, String>,
-    )'''
-                new_body = ''' {
-        LogUtil.d(AppConfig.TAG, "🔗 Processing PROXYCHAIN for tag='${resolvedOutbound.tag}', prepend=$prepend")
-        LogUtil.d(AppConfig.TAG, "   Number of resolvedProfiles: ${resolvedOutbound.resolvedProfiles.size}")
+    brace_count = 1
+    i = open_brace + 1
+    while i < len(c) and brace_count > 0:
+        if c[i] == '{':
+            brace_count += 1
+        elif c[i] == '}':
+            brace_count -= 1
+        i += 1
+    if brace_count != 0:
+        print("⚠ CoreConfigManager: brace mismatch in configureDns")
+        return
 
-        val mainRemarks = getCurrentMainServerRemarks()
-        LogUtil.d(AppConfig.TAG, "   Current main server remarks: '$mainRemarks'")
+    method_end = i
+    method_body = c[method_start:method_end]
 
-        var prevOutboundTag: String? = null
+    if "PREF_DNS_PARALLEL_QUERY" in method_body and "PREF_DNS_SERVE_STALE" in method_body:
+        print("• CoreConfigManager: DNS prefs already wired")
+        return
 
-        for ((profileIndex, profile) in resolvedOutbound.resolvedProfiles.withIndex()) {
-            val profileRemarks = profile.remarks.trim()
-            val isMainServer = mainRemarks != null && profileRemarks.equals(mainRemarks, ignoreCase = true)
+    backup_kotlin(p)
 
-            val desiredTag = if (profileIndex == 0) {
-                resolvedOutbound.tag
-            } else {
-                "${AppConfig.TAG_PROXY}-${resolvedOutbound.tag}-${profileIndex}"
-            }
-
-            if (isMainServer && profileIndex == 0) {
-                LogUtil.d(AppConfig.TAG, "♻️ Hop 0 is current main server ('$profileRemarks') – setting ${resolvedOutbound.tag}.dialerProxy = 'proxy'")
-                val customOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == resolvedOutbound.tag }
-                if (customOutbound != null) {
-                    customOutbound.ensureSockopt().dialerProxy = AppConfig.TAG_PROXY
-                }
-                return
-            }
-
-            if (isMainServer && profileIndex > 0) {
-                LogUtil.d(AppConfig.TAG, "♻️ Hop $profileIndex is current main server ('$profileRemarks') – chaining previous to 'proxy'")
-                if (prevOutboundTag != null) {
-                    val prevOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == prevOutboundTag }
-                    if (prevOutbound != null) {
-                        prevOutbound.ensureSockopt().dialerProxy = AppConfig.TAG_PROXY
-                        LogUtil.d(AppConfig.TAG, "🔗 Set dialerProxy of '$prevOutboundTag' → 'proxy'")
-                    }
-                }
-                continue
-            }
-
-            val outbound = convertProfile2Outbound(profile)
-            if (outbound == null) {
-                LogUtil.e(AppConfig.TAG, "❌ Failed to convert profile '${profile.remarks}' (type=${profile.configType})")
-                continue
-            }
-            outbound.tag = desiredTag
-
-            val mapKey = "chain-${profile.remarks}"
-            val existingTag = outboundTagMap[mapKey]
-            if (existingTag != null) {
-                val existingOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == existingTag }
-                if (existingOutbound != null) {
-                    if (prevOutboundTag != null) {
-                        val prevOut = v2rayConfig.outbounds.firstOrNull { it.tag == prevOutboundTag }
-                        prevOut?.ensureSockopt()?.dialerProxy = existingTag
-                        LogUtil.d(AppConfig.TAG, "🔗 Reused existing hop $existingTag, wired from $prevOutboundTag")
-                    }
-                    prevOutboundTag = existingTag
-                    continue
-                }
-            }
-
-            if (prepend) {
-                v2rayConfig.outbounds.add(0, outbound)
-            } else {
-                v2rayConfig.outbounds.add(outbound)
-            }
-            existingTags.add(desiredTag)
-            outboundTagMap[mapKey] = desiredTag
-
-            if (prevOutboundTag != null) {
-                val prevOut = v2rayConfig.outbounds.firstOrNull { it.tag == prevOutboundTag }
-                prevOut?.ensureSockopt()?.dialerProxy = desiredTag
-                LogUtil.d(AppConfig.TAG, "🔗 Wired $prevOutboundTag → $desiredTag")
-            }
-            prevOutboundTag = desiredTag
-        }
-
-        if (prevOutboundTag == null) {
-            val customOutboundTag = resolvedOutbound.tag
-            val customOutbound = v2rayConfig.outbounds.firstOrNull { it.tag == customOutboundTag }
-            if (customOutbound != null) {
-                customOutbound.ensureSockopt().dialerProxy = AppConfig.TAG_PROXY
-                LogUtil.d(AppConfig.TAG, "🔗 All hops are main server – set dialerProxy of '$customOutboundTag' → 'proxy'")
-            }
-        }
-    }'''
-                method_end = i
-                c = c[:method_start] + new_signature + new_body + c[method_end:]
-                print("✓ CoreConfigManager: replaced handleProxyChainResolvedOutbound body")
-            else:
-                print("⚠ CoreConfigManager: brace mismatch for handleProxyChainResolvedOutbound")
-        else:
-            print("⚠ CoreConfigManager: could not find opening brace for handleProxyChainResolvedOutbound")
-    else:
-        print("⚠ CoreConfigManager: handleProxyChainResolvedOutbound method not found")
-
-    # 6.6 FIXED: wire DNS parallel-query / serve-stale prefs into the ACTIVE
-    # configureDns. There are TWO configureDns() defs in this file: an old
-    # one wrapped in /* ... */ (dead, kept for reference) and the real one
-    # actually called from buildUnifiedConfig(). We anchor on the live
-    # signature specifically so we never edit the commented-out copy, and we
-    # compute both booleans up front instead of mutating DnsBean afterwards
-    # (enableParallelQuery is a `val` - post-construction mutation of it
-    # can't compile).
-    live_signature = "private fun configureDns(\n        configContext: CoreConfigContext,"
-    method_start = c.find(live_signature)
-    if method_start != -1:
-        open_brace = c.find('{', method_start)
-        if open_brace != -1:
-            brace_count = 1
-            i = open_brace + 1
-            while i < len(c) and brace_count > 0:
-                if c[i] == '{':
-                    brace_count += 1
-                elif c[i] == '}':
-                    brace_count -= 1
-                i += 1
-            if brace_count == 0:
-                method_end = i
-                method_body = c[method_start:method_end]
-
-                old_dns_construction = '''v2rayConfig.dns = V2rayConfig.DnsBean(
+    old_dns_construction = '''v2rayConfig.dns = V2rayConfig.DnsBean(
             servers = servers,
             hosts = hosts,
             tag = AppConfig.TAG_DNS,
             enableParallelQuery = if ((domesticDns.size + remoteDns.size) > 2) true else null
         )'''
-                new_dns_construction = '''val dnsParallelQueryEnabled = MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_PARALLEL_QUERY, false)
+    new_dns_construction = '''val dnsParallelQueryEnabled = MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_PARALLEL_QUERY, false)
         val dnsServeStaleEnabled = MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_SERVE_STALE, false)
 
         v2rayConfig.dns = V2rayConfig.DnsBean(
@@ -730,98 +219,34 @@ def patch_coreconfigmanager():
             serveStale = if (dnsServeStaleEnabled) true else null
         )'''
 
-                if "PREF_DNS_PARALLEL_QUERY" in method_body:
-                    print("• CoreConfigManager: active configureDns already wired for DNS prefs")
-                elif old_dns_construction in method_body:
-                    new_method_body = method_body.replace(old_dns_construction, new_dns_construction, 1)
-                    c = c[:method_start] + new_method_body + c[method_end:]
-                    print("✓ CoreConfigManager: wired DNS parallel-query/serve-stale prefs into the ACTIVE configureDns")
-                else:
-                    print("⚠ CoreConfigManager: DnsBean construction not found inside active configureDns — source may have changed, check manually")
-            else:
-                print("⚠ CoreConfigManager: brace mismatch for configureDns")
-        else:
-            print("⚠ CoreConfigManager: could not find opening brace for configureDns")
+    if old_dns_construction in method_body:
+        new_method_body = method_body.replace(old_dns_construction, new_dns_construction, 1)
+        c = c[:method_start] + new_method_body + c[method_end:]
+        print("✓ CoreConfigManager: wired PREF_DNS_PARALLEL_QUERY + PREF_DNS_SERVE_STALE")
     else:
-        print("⚠ CoreConfigManager: active configureDns(configContext, ...) not found")
-
-    # 6.7 Replace buildDnsHostsFromRoutingRules with BIND‑style hosts parser (using raw regex)
-    method_start = c.find("private fun buildDnsHostsFromRoutingRules(")
-    if method_start != -1:
-        open_brace = c.find('{', method_start)
-        if open_brace != -1:
-            brace_count = 1
-            i = open_brace + 1
-            while i < len(c) and brace_count > 0:
-                if c[i] == '{':
-                    brace_count += 1
-                elif c[i] == '}':
-                    brace_count -= 1
-                i += 1
-            if brace_count == 0:
-                new_build_hosts = r'''    private fun buildDnsHostsFromRoutingRules(configContext: CoreConfigContext): MutableMap<String, Any> {
-        val hosts = mutableMapOf<String, Any>()
-
-        val blockDomains = configContext.routingDomainRules
-            .asSequence()
-            .filter { it.outboundTag == AppConfig.TAG_BLOCKED }
-            .flatMap { it.domain.asSequence() }
-            .toList()
-        if (blockDomains.isNotEmpty()) {
-            hosts.putAll(blockDomains.map { it to AppConfig.LOOPBACK })
-        }
-
-        hosts[AppConfig.GOOGLEAPIS_CN_DOMAIN] = AppConfig.GOOGLEAPIS_COM_DOMAIN
-        hosts[AppConfig.DNS_ALIDNS_DOMAIN] = AppConfig.DNS_ALIDNS_ADDRESSES
-        hosts[AppConfig.DNS_CISCO_SSE_DOMAIN] = AppConfig.DNS_CISCO_SSE_ADDRESSES
-        hosts[AppConfig.DNS_CISCO_UMBRELLA_DOMAIN] = AppConfig.DNS_CISCO_UMBRELLA_ADDRESSES
-        hosts[AppConfig.DNS_CLOUDFLARE_ONE_DOMAIN] = AppConfig.DNS_CLOUDFLARE_ONE_ADDRESSES
-        hosts[AppConfig.DNS_CLOUDFLARE_ONEDOT_DNS_DOMAIN] = AppConfig.DNS_CLOUDFLARE_ONEDOT_DNS_ADDRESSES
-        hosts[AppConfig.DNS_CLOUDFLARE_DNS_COM_DOMAIN] = AppConfig.DNS_CLOUDFLARE_DNS_COM_ADDRESSES
-        hosts[AppConfig.DNS_CLOUDFLARE_DNS_DOMAIN] = AppConfig.DNS_CLOUDFLARE_DNS_ADDRESSES
-        hosts[AppConfig.DNS_CLOUDFLARE_WARP_DOMAIN] = AppConfig.DNS_CLOUDFLARE_WARP_ADDRESSES
-        hosts[AppConfig.DNS_DNSPOD_DOH_DOMAIN] = AppConfig.DNS_DNSPOD_DOH_ADDRESSES
-        hosts[AppConfig.DNS_DNSPOD_DOT_DOMAIN] = AppConfig.DNS_DNSPOD_DOT_ADDRESSES
-        hosts[AppConfig.DNS_GOOGLE_DOMAIN] = AppConfig.DNS_GOOGLE_ADDRESSES
-        hosts[AppConfig.DNS_QUAD9_DOMAIN] = AppConfig.DNS_QUAD9_ADDRESSES
-        hosts[AppConfig.DNS_SB_DOMAIN] = AppConfig.DNS_SB_ADDRESSES
-        hosts[AppConfig.DNS_YANDEX_DOMAIN] = AppConfig.DNS_YANDEX_ADDRESSES
-
-        // User DNS hosts – BIND‑style format (one line per domain, space‑separated addresses)
-        val userHosts = MmkvManager.decodeSettingsString(AppConfig.PREF_DNS_HOSTS)
-        if (userHosts.isNotNullEmpty()) {
-            val userHostsMap = userHosts?.lines()
-                ?.filter { it.isNotEmpty() }
-                ?.filter { it.contains(" ") }
-                ?.associate { line ->
-                    val parts = line.trim().split(Regex("""\s+"""))
-                    val key = parts[0]
-                    val values = parts.drop(1)
-                    key to if (values.size == 1) values[0] else values
-                }
-            if (userHostsMap != null) {
-                hosts.putAll(userHostsMap)
-            }
-        }
-
-        return hosts
-    }'''
-                method_end = i
-                c = c[:method_start] + new_build_hosts + c[method_end:]
-                print("✓ CoreConfigManager: replaced buildDnsHostsFromRoutingRules with BIND‑style parser (raw regex)")
-            else:
-                print("⚠ CoreConfigManager: brace mismatch for buildDnsHostsFromRoutingRules")
+        # looser regex
+        pat = re.compile(
+            r'v2rayConfig\.dns\s*=\s*V2rayConfig\.DnsBean\s*\(\s*'
+            r'servers\s*=\s*servers\s*,\s*'
+            r'hosts\s*=\s*hosts\s*,\s*'
+            r'tag\s*=\s*AppConfig\.TAG_DNS\s*,\s*'
+            r'enableParallelQuery\s*=\s*if\s*\(\(domesticDns\.size\s*\+\s*remoteDns\.size\)\s*>\s*2\)\s*true\s*else\s*null\s*'
+            r'\)',
+            re.DOTALL
+        )
+        if pat.search(method_body):
+            new_method_body = pat.sub(new_dns_construction.strip(), method_body, count=1)
+            c = c[:method_start] + new_method_body + c[method_end:]
+            print("✓ CoreConfigManager: wired via regex")
         else:
-            print("⚠ CoreConfigManager: could not find opening brace for buildDnsHostsFromRoutingRules")
-    else:
-        print("⚠ CoreConfigManager: buildDnsHostsFromRoutingRules method not found")
+            print("⚠ CoreConfigManager: DnsBean construction not found inside configureDns")
+            return
 
     write(p, c)
-    print("✓ CoreConfigManager: targeted patches applied")
 
 
 # ----------------------------------------------------------------------
-# 7. SettingsActivity.kt – add DNS parallel/stale switches
+# 5. SettingsActivity.kt – the two switches
 # ----------------------------------------------------------------------
 def patch_settings():
     p = BASE / "app/src/main/java/com/v2ray/ang/ui/settings/SettingsActivity.kt"
@@ -830,55 +255,55 @@ def patch_settings():
         return
     c = read(p)
 
-    old_decls = "var dnsHosts by rememberMmkvString(AppConfig.PREF_DNS_HOSTS, \"\")"
+    # state declarations
+    old_decls = 'var dnsHosts by rememberMmkvString(AppConfig.PREF_DNS_HOSTS, "")'
     new_decls = old_decls + """
     var dnsParallelQuery by rememberMmkvBool(AppConfig.PREF_DNS_PARALLEL_QUERY, false)
     var dnsServeStale by rememberMmkvBool(AppConfig.PREF_DNS_SERVE_STALE, false)"""
-    if old_decls in c and "dnsParallelQuery" not in c:
-        c = c.replace(old_decls, new_decls, 1)
-        print("✓ SettingsActivity: added DNS parallel/stale state declarations")
-    elif "dnsParallelQuery" in c:
+    if "dnsParallelQuery" in c:
         print("• SettingsActivity: DNS states already present")
+    elif old_decls in c:
+        c = c.replace(old_decls, new_decls, 1)
+        print("✓ SettingsActivity: added DNS parallel/stale state")
     else:
-        print("⚠ SettingsActivity: could not find dnsHosts declaration block")
+        print("⚠ SettingsActivity: dnsHosts declaration not found")
 
-    pattern = r'(SettingsEditItem\(\s*title = stringResource\(R\.string\.title_pref_dns_hosts\),\s*value = dnsHosts,\s*onValueChanged = \{ dnsHosts = it \}\s*\))'
-    if re.search(pattern, c, re.DOTALL) and "title_pref_dns_parallel_query" not in c:
-        replacement = r'\1\n                SettingsSwitchItem(\n                    title = stringResource(R.string.title_pref_dns_parallel_query),\n                    summary = stringResource(R.string.summary_pref_dns_parallel_query),\n                    checked = dnsParallelQuery,\n                    onCheckedChange = { dnsParallelQuery = it }\n                )\n                SettingsSwitchItem(\n                    title = stringResource(R.string.title_pref_dns_serve_stale),\n                    summary = stringResource(R.string.summary_pref_dns_serve_stale),\n                    checked = dnsServeStale,\n                    onCheckedChange = { dnsServeStale = it }\n                )'
-        c = re.sub(pattern, replacement, c, flags=re.DOTALL)
-        print("✓ SettingsActivity: inserted DNS parallel/stale switches")
+    # UI switches
+    if "title_pref_dns_parallel_query" in c:
+        print("• SettingsActivity: switches already present")
     else:
-        print("⚠ SettingsActivity: dnsHosts block not found or switches already present")
+        pattern = r'(SettingsEditItem\(\s*title = stringResource\(R\.string\.title_pref_dns_hosts\),\s*value = dnsHosts,\s*onValueChanged = \{ dnsHosts = it \}\s*\))'
+        replacement = r'''\1
+                SettingsSwitchItem(
+                    title = stringResource(R.string.title_pref_dns_parallel_query),
+                    summary = stringResource(R.string.summary_pref_dns_parallel_query),
+                    checked = dnsParallelQuery,
+                    onCheckedChange = { dnsParallelQuery = it }
+                )
+                SettingsSwitchItem(
+                    title = stringResource(R.string.title_pref_dns_serve_stale),
+                    summary = stringResource(R.string.summary_pref_dns_serve_stale),
+                    checked = dnsServeStale,
+                    onCheckedChange = { dnsServeStale = it }
+                )'''
+        new_c, n = re.subn(pattern, replacement, c, flags=re.DOTALL)
+        if n:
+            c = new_c
+            print("✓ SettingsActivity: inserted DNS parallel/stale switches")
+        else:
+            print("⚠ SettingsActivity: dnsHosts SettingsEditItem block not found")
 
     write(p, c)
 
 
 # ----------------------------------------------------------------------
-# 8. FormFields.kt - filter by typed text + hard cap (NOT LazyColumn)
+# 6. FormFields.kt – typed filter + 50-item hard cap (no LazyColumn)
 # ----------------------------------------------------------------------
 def patch_formfields():
     """
-    v1 of this fix wrapped the dropdown's items in a LazyColumn. That
-    crashes: Material3's ExposedDropdownMenu auto-sizes itself by querying
-    INTRINSIC measurements of its content, and LazyColumn - like any
-    SubcomposeLayout-based layout - explicitly does not support being
-    intrinsically measured ("Asking for intrinsic measurements of
-    SubcomposeLayout layouts is not supported"). This is a known Compose
-    limitation (Google issue trackers 242101969 / 242398344), not something
-    fixable with a modifier tweak on the LazyColumn.
-
-    Real fix: keep the plain (non-lazy) Column that ExposedDropdownMenu
-    requires, but stop handing it hundreds of items. Every editable=true
-    FormDropdownField in this codebase (outboundTag, fallbackTag,
-    prevProfile/nextProfile, the proxy-chain member picker) is a
-    type-a-value-with-suggestions field, so filtering the suggestion list by
-    what's currently typed is correct UX, not just a perf hack. A hard cap
-    of 50 is the backstop for the unfiltered case (field is empty, list is
-    huge) - well under the ~100-item threshold where a plain Column starts
-    to visibly lag.
-
-    Idempotent against BOTH a pristine checkout and a tree that already has
-    the v1 LazyColumn attempt applied.
+    Keep the plain Column that ExposedDropdownMenu requires (LazyColumn
+    crashes on intrinsic measurement). Bound what it renders by filtering
+    on typed text + a hard cap of 50.
     """
     p = BASE / "app/src/main/java/com/v2ray/ang/ui/compose/FormFields.kt"
     if not p.exists():
@@ -886,7 +311,7 @@ def patch_formfields():
         return
     c = read(p)
 
-    # Remove lazy-only imports left over from a v1 run, if present.
+    # drop any leftover lazy imports from a previous attempt
     for stale in (
         "import androidx.compose.foundation.lazy.LazyColumn\n",
         "import androidx.compose.foundation.lazy.items\n",
@@ -906,7 +331,7 @@ def patch_formfields():
             c = c[:pos] + "\n" + "\n".join(missing) + c[pos:]
             print(f"✓ FormFields: added {len(missing)} import(s)")
 
-    # --- state: add the filtered/capped options list ---
+    # state: filtered + capped list
     old_state = '''    var expanded by rememberSaveable { mutableStateOf(false) }
     val menuScrollState = rememberScrollState()
     val focusManager = LocalFocusManager.current
@@ -916,11 +341,8 @@ def patch_formfields():
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
 
-    // ExposedDropdownMenu can't host a LazyColumn (it queries intrinsic
-    // measurements to size itself; SubcomposeLayout-backed lazy lists don't
-    // support that). Keep the required plain Column, but bound what it
-    // renders: filter by what's typed (every editable usage here is a
-    // suggestions-for-a-typed-value field) and cap the rest as a backstop.
+    // ExposedDropdownMenu can't host a LazyColumn (intrinsic measurement).
+    // Keep the plain Column, filter by typed text, hard-cap at 50.
     val visibleOptions = remember(options, value, editable) {
         val base = if (editable && value.isNotBlank()) {
             options.filter { it.contains(value, ignoreCase = true) }
@@ -935,9 +357,9 @@ def patch_formfields():
         c = c.replace(old_state, new_state, 1)
         print("✓ FormFields: added typed-text filtering + 50-item cap")
     else:
-        print("⚠ FormFields: could not find FormDropdownField state block — source may have changed")
+        print("⚠ FormFields: state block not found")
 
-    # --- menu content: render visibleOptions instead of options ---
+    # menu content
     pristine_menu = '''        ExposedDropdownMenu(
             expanded = expanded,
             onDismissRequest = { expanded = false },
@@ -1004,213 +426,17 @@ def patch_formfields():
                 )
             }
         }'''
+
     if "visibleOptions.forEach" in c:
         print("• FormFields: dropdown menu already updated")
     elif pristine_menu in c:
         c = c.replace(pristine_menu, new_menu, 1)
-        print("✓ FormFields: dropdown menu now renders the filtered/capped list")
+        print("✓ FormFields: dropdown now uses filtered/capped list")
     elif lazy_menu_from_v1 in c:
         c = c.replace(lazy_menu_from_v1, new_menu, 1)
-        print("↺ FormFields: reverted the v1 LazyColumn attempt (crashes inside ExposedDropdownMenu) and switched to filtering")
+        print("↺ FormFields: reverted LazyColumn attempt → filtering")
     else:
-        print("⚠ FormFields: could not find the ExposedDropdownMenu block — source may have changed")
-
-    write(p, c)
-
-
-# ----------------------------------------------------------------------
-# 9. CoreConfigManager.kt - revert the configContext-based DNS path
-#    (mirrors DHR60/v2rayNG@4ce36c0) and revive the old configureDns, drop the
-#    configContext-based one + its 3 helpers, carry the DNS-toggle wiring
-#    over, and switch configureLocalDns back to the non-configContext form.
-# ----------------------------------------------------------------------
-def revert_coreconfigmanager():
-    p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
-    if not p.exists():
-        print("✗ CoreConfigManager.kt not found — skipping")
-        return
-    c = read(p)
-
-    if "private fun configureDns(\n        v2rayConfig: V2rayConfig," in c and \
-       "private fun configureDns(\n        configContext: CoreConfigContext," not in c:
-        print("• CoreConfigManager: DNS revert already applied, skipping")
-        return
-
-    backup_kotlin(p)
-
-    # --- call site: drop configContext from both calls ---
-    old_call = "configureDns(configContext, v2rayConfig, policyGroupBalancerTags)\n        configureLocalDns(configContext, v2rayConfig)"
-    new_call = "configureDns(v2rayConfig, policyGroupBalancerTags)\n        configureLocalDns(v2rayConfig)"
-    if old_call in c:
-        c = c.replace(old_call, new_call, 1)
-        print("✓ CoreConfigManager: updated buildUnifiedConfig call site")
-    else:
-        print("⚠ CoreConfigManager: configureDns/configureLocalDns call site not found as expected")
-
-    # --- configureLocalDns: signature + domain collection ---
-    old_sig = "private fun configureLocalDns(configContext: CoreConfigContext, v2rayConfig: V2rayConfig) {"
-    new_sig = "private fun configureLocalDns(v2rayConfig: V2rayConfig) {"
-    if old_sig in c:
-        c = c.replace(old_sig, new_sig, 1)
-        print("✓ CoreConfigManager: updated configureLocalDns signature")
-
-    old_domains = '''val geositeCn = arrayListOf(AppConfig.GEOSITE_CN)
-            val routingDomains = configContext.routingDomainRules
-                .asSequence()
-                .filter { it.outboundTag != AppConfig.TAG_BLOCKED }
-                .flatMap { it.domain.asSequence() }
-                .toList()
-                .distinct()
-            val finalDomain = geositeCn + routingDomains'''
-    new_domains = '''val geositeCn = arrayListOf(AppConfig.GEOSITE_CN)
-            val proxyDomain = collectUserRuleDomainsByTag(AppConfig.TAG_PROXY)
-            val directDomain = collectUserRuleDomainsByTag(AppConfig.TAG_DIRECT)
-            val finalDomain = geositeCn.plus(proxyDomain).plus(directDomain).distinct()'''
-    if old_domains in c:
-        c = c.replace(old_domains, new_domains, 1)
-        print("✓ CoreConfigManager: configureLocalDns now collects domains via collectUserRuleDomainsByTag")
-    else:
-        print("⚠ CoreConfigManager: configureLocalDns domain-collection block not found as expected")
-
-    # --- revive the old configureDns, delete the configContext-based one + its 3 helpers ---
-    dead_open_anchor = (
-        "\n    /*\n    /**\n     * Configure DNS servers, hosts, and DNS routing rules.\n"
-        "     */\n    private fun configureDns(\n        v2rayConfig: V2rayConfig,\n"
-        "        policyGroupBalancerTags: Map<String, String>,\n    ) {"
-    )
-    transition_anchor = (
-        "\n    */\n\n    /**\n     * Configure DNS servers, hosts, and DNS routing rules.\n"
-        "     */\n    private fun configureDns(\n        configContext: CoreConfigContext,"
-    )
-    dead_open_idx = c.find(dead_open_anchor)
-    if dead_open_idx == -1:
-        print("⚠ CoreConfigManager: commented-out configureDns(v2rayConfig, ...) not found — already reverted, or source has drifted")
-    else:
-        transition_idx = c.find(transition_anchor, dead_open_idx)
-        end_idx = c.find("\n\n    //endregion", transition_idx) if transition_idx != -1 else -1
-        if transition_idx == -1 or end_idx == -1:
-            print("⚠ CoreConfigManager: could not locate the end of the configContext-based DNS block — source has drifted, check manually")
-        else:
-            dead_body = c[dead_open_idx + len(dead_open_anchor): transition_idx]
-
-            # carry the DNS-toggle wiring over (same transformation patch_fixed.py applied)
-            old_dns_construction = '''v2rayConfig.dns = V2rayConfig.DnsBean(
-            servers = servers,
-            hosts = hosts,
-            tag = AppConfig.TAG_DNS,
-            enableParallelQuery = if ((domesticDns.size + remoteDns.size) > 2) true else null
-        )'''
-            new_dns_construction = '''val dnsParallelQueryEnabled = MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_PARALLEL_QUERY, false)
-        val dnsServeStaleEnabled = MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_SERVE_STALE, false)
-
-        v2rayConfig.dns = V2rayConfig.DnsBean(
-            servers = servers,
-            hosts = hosts,
-            tag = AppConfig.TAG_DNS,
-            enableParallelQuery = if (dnsParallelQueryEnabled) true else null,
-            serveStale = if (dnsServeStaleEnabled) true else null
-        )'''
-            if old_dns_construction in dead_body:
-                dead_body = dead_body.replace(old_dns_construction, new_dns_construction, 1)
-                print("✓ CoreConfigManager: carried DNS parallel-query/serve-stale wiring into the revived configureDns")
-            else:
-                print("⚠ CoreConfigManager: DnsBean construction not found in the revived body — DNS toggle wiring NOT carried over, check manually")
-
-            revived_function = (
-                "\n    /**\n     * Configure DNS servers, hosts, and DNS routing rules.\n     */\n"
-                "    private fun configureDns(\n        v2rayConfig: V2rayConfig,\n"
-                "        policyGroupBalancerTags: Map<String, String>,\n    ) {" + dead_body
-            )
-            c = c[:dead_open_idx] + revived_function + c[end_idx:]
-            print("✓ CoreConfigManager: revived configureDns(v2rayConfig, policyGroupBalancerTags) and removed the configContext-based DNS block (+3 helpers)")
-
-    write(p, c)
-
-
-# ----------------------------------------------------------------------
-# 10. CoreConfigContextBuilder.kt - stop collecting/passing routingDomainRules
-# ----------------------------------------------------------------------
-def revert_coreconfigcontextbuilder():
-    p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigContextBuilder.kt"
-    if not p.exists():
-        print("✗ CoreConfigContextBuilder.kt not found — skipping")
-        return
-    c = read(p)
-
-    if "collectRoutingDomainRulesForDns" not in c:
-        print("• CoreConfigContextBuilder: DNS revert already applied, skipping")
-        return
-
-    old_build_lines = "        val routingDomainRules = collectRoutingDomainRulesForDns()\n\n        return CoreConfigContext("
-    new_build_lines = "        return CoreConfigContext("
-    if old_build_lines in c:
-        c = c.replace(old_build_lines, new_build_lines, 1)
-        print("✓ CoreConfigContextBuilder: stopped collecting routingDomainRules in build()")
-    else:
-        print("⚠ CoreConfigContextBuilder: routingDomainRules collection line not found as expected")
-
-    old_arg = "            routingDomainRules = routingDomainRules,\n"
-    if old_arg in c:
-        c = c.replace(old_arg, "", 1)
-        print("✓ CoreConfigContextBuilder: stopped passing routingDomainRules into CoreConfigContext(...)")
-    else:
-        print("⚠ CoreConfigContextBuilder: routingDomainRules argument not found as expected")
-
-    method_start = c.find("    /**\n     * Collect enabled routing domain rules in original order for DNS segmentation.")
-    if method_start != -1:
-        open_brace = c.find("private fun collectRoutingDomainRulesForDns", method_start)
-        open_brace = c.find('{', open_brace)
-        brace_count = 1
-        i = open_brace + 1
-        while i < len(c) and brace_count > 0:
-            if c[i] == '{':
-                brace_count += 1
-            elif c[i] == '}':
-                brace_count -= 1
-            i += 1
-        if brace_count == 0:
-            c = c[:method_start] + c[i:]
-            print("✓ CoreConfigContextBuilder: removed collectRoutingDomainRulesForDns()")
-        else:
-            print("⚠ CoreConfigContextBuilder: brace mismatch removing collectRoutingDomainRulesForDns — check manually")
-    else:
-        print("⚠ CoreConfigContextBuilder: collectRoutingDomainRulesForDns() not found as expected")
-
-    write(p, c)
-
-
-# ----------------------------------------------------------------------
-# 11. CoreConfigContext.kt - drop the routingDomainRules field + nested type
-# ----------------------------------------------------------------------
-def revert_coreconfigcontext():
-    p = BASE / "app/src/main/java/com/v2ray/ang/dto/CoreConfigContext.kt"
-    if not p.exists():
-        print("✗ CoreConfigContext.kt not found — skipping")
-        return
-    c = read(p)
-
-    if "routingDomainRules" not in c:
-        print("• CoreConfigContext: DNS revert already applied, skipping")
-        return
-
-    old_field = "    val routingDomainRules: List<RoutingDomainRule> = emptyList(),\n"
-    if old_field in c:
-        c = c.replace(old_field, "", 1)
-        print("✓ CoreConfigContext: removed routingDomainRules field")
-    else:
-        print("⚠ CoreConfigContext: routingDomainRules field not found as expected")
-
-    old_nested_type = '''
-    data class RoutingDomainRule(
-        val domain: List<String>,
-        val outboundTag: String,
-    )
-'''
-    if old_nested_type in c:
-        c = c.replace(old_nested_type, "", 1)
-        print("✓ CoreConfigContext: removed RoutingDomainRule data class")
-    else:
-        print("⚠ CoreConfigContext: RoutingDomainRule data class not found as expected")
+        print("⚠ FormFields: ExposedDropdownMenu block not found")
 
     write(p, c)
 
@@ -1220,26 +446,16 @@ def revert_coreconfigcontext():
 # ----------------------------------------------------------------------
 def main():
     print("=" * 70)
-    print("Unified Patcher - DNS prefs + fast dropdown + DHR60 DNS revert")
+    print("Minimal patcher: DNS Parallel/Serve-Stale + FormFields dropdowns")
     print("=" * 70)
-
     try:
-        # DNS toggle + dropdown fixes
         patch_appconfig()
         patch_v2rayconfig()
-        patch_subedit()
         patch_strings()
-        patch_coreconfigcontextbuilder()
-        patch_coreconfigmanager()
+        patch_coreconfigmanager_dns()
         patch_settings()
         patch_formfields()
-
-        # DHR60-style DNS revert (must run after the above - see module docstring)
-        revert_coreconfigmanager()
-        revert_coreconfigcontextbuilder()
-        revert_coreconfigcontext()
-
-        print("\n✅ All patches applied successfully.")
+        print("\n✅ Done.")
         print("👉 Rebuild and test.")
     except Exception as e:
         print(f"\n❌ Error: {e}")
