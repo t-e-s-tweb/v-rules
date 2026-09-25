@@ -107,11 +107,11 @@ def patch_v2rayconfig():
 # ----------------------------------------------------------------------
 # 3. CoreConfigManager.kt
 #
-#    Match the exact literal DnsBean construction from the live
-#    configureDns(configContext, v2rayConfig, policyGroupBalancerTags)
-#    method and replace the two fields we care about.
-#
-#    Idempotency marker: // (dns-prefs-injected)
+#    IMPORTANT: the DnsBean construction appears TWICE in the file —
+#    once inside a /* ... */ commented legacy block, once in the live
+#    configureDns(configContext, ...) method. Both are byte-for-byte
+#    identical, so we must replace ALL occurrences (no count), or we
+#    will rewrite the dead comment and leave the live code untouched.
 # ----------------------------------------------------------------------
 def patch_coreconfigmanager():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
@@ -145,12 +145,14 @@ def patch_coreconfigmanager():
 
     if old in c:
         backup_kotlin(p)
-        c = c.replace(old, new, 1)
+        n = c.count(old)
+        c = c.replace(old, new)          # replace ALL occurrences
         write(p, c)
-        print("✓ CoreConfigManager: DnsBean rewritten with pref-driven fields")
+        print(f"✓ CoreConfigManager: DnsBean rewritten ({n} occurrence(s), "
+              f"live + commented)")
     else:
         print("⚠ CoreConfigManager: exact DnsBean literal not found — "
-              "inspect manually whether upstream reformatted the call")
+              "upstream may have reformatted the call")
 
 
 # ----------------------------------------------------------------------
@@ -176,7 +178,7 @@ def patch_wireguard_remotedns():
 
     if old1 in c:
         backup_kotlin(p)
-        c = c.replace(old1, new1, 1)
+        c = c.replace(old1, new1)
         write(p, c)
         print("✓ CoreOutboundBuilder: split fallback (with ?:)")
     elif old2 in c:
@@ -184,8 +186,7 @@ def patch_wireguard_remotedns():
         c = c.replace(
             old2,
             "AppConfig.WIREGUARD_LOCAL_REMOTE_DNS"
-            ".split(\",\").map { it.trim() }.filter { it.isNotEmpty() }",
-            1
+            ".split(\",\").map { it.trim() }.filter { it.isNotEmpty() }"
         )
         write(p, c)
         print("✓ CoreOutboundBuilder: split fallback")
