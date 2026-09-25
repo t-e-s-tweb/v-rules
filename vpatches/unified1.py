@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """
 v2rayNG patcher for 2dust/v2rayNG master
-  • DNS Parallel Query + Serve Stale UI toggles (prefs + strings + switches)
   • FormFields dropdown performance (typed filter + 50-item hard cap)
 
-The core configuration is left untouched – upstream already sets
-enableParallelQuery automatically based on the number of DNS servers.
 Idempotent.
 """
 
@@ -35,127 +32,9 @@ def write(p, s):
 
 
 # ----------------------------------------------------------------------
-# 1. AppConfig.kt – add DNS pref keys
-# ----------------------------------------------------------------------
-def patch_appconfig():
-    p = BASE / "app/src/main/java/com/v2ray/ang/AppConfig.kt"
-    if not p.exists():
-        print("✗ AppConfig.kt not found")
-        return
-    c = read(p)
-
-    if "PREF_DNS_PARALLEL_QUERY" in c and "PREF_DNS_SERVE_STALE" in c:
-        print("• AppConfig: DNS pref keys already present")
-        return
-
-    old = '    const val PREF_DNS_HOSTS = "pref_dns_hosts"'
-    new = '''    const val PREF_DNS_HOSTS = "pref_dns_hosts"
-    const val PREF_DNS_PARALLEL_QUERY = "pref_dns_parallel_query"
-    const val PREF_DNS_SERVE_STALE = "pref_dns_serve_stale"'''
-    if old in c:
-        c = c.replace(old, new, 1)
-        write(p, c)
-        print("✓ AppConfig: added PREF_DNS_PARALLEL_QUERY + PREF_DNS_SERVE_STALE")
-    else:
-        print("⚠ AppConfig: PREF_DNS_HOSTS declaration not found")
-
-
-# ----------------------------------------------------------------------
-# 2. SettingsActivity.kt – add DNS state + switches
-# ----------------------------------------------------------------------
-def patch_settings():
-    p = BASE / "app/src/main/java/com/v2ray/ang/ui/settings/SettingsActivity.kt"
-    if not p.exists():
-        print("✗ SettingsActivity.kt not found")
-        return
-    c = read(p)
-
-    # 2a. State declarations
-    old_decl = 'var dnsHosts by rememberMmkvString(AppConfig.PREF_DNS_HOSTS, "")'
-    new_decl = old_decl + """
-    var dnsParallelQuery by rememberMmkvBool(AppConfig.PREF_DNS_PARALLEL_QUERY, false)
-    var dnsServeStale by rememberMmkvBool(AppConfig.PREF_DNS_SERVE_STALE, false)"""
-    if "dnsParallelQuery" in c:
-        print("• SettingsActivity: DNS states already present")
-    elif old_decl in c:
-        c = c.replace(old_decl, new_decl, 1)
-        print("✓ SettingsActivity: added DNS parallel/stale state")
-    else:
-        print("⚠ SettingsActivity: dnsHosts declaration not found")
-
-    # 2b. UI switches – insert after the dnsHosts SettingsEditItem block
-    if "title_pref_dns_parallel_query" in c:
-        print("• SettingsActivity: switches already present")
-    else:
-        pattern = (
-            r'(SettingsEditItem\(\s*'
-            r'title = stringResource\(R\.string\.title_pref_dns_hosts\),\s*'
-            r'value = dnsHosts,\s*'
-            r'onValueChanged = \{ dnsHosts = it \}\s*'
-            r'\))'
-        )
-        replacement = r'''\1
-                SettingsSwitchItem(
-                    title = stringResource(R.string.title_pref_dns_parallel_query),
-                    summary = stringResource(R.string.summary_pref_dns_parallel_query),
-                    checked = dnsParallelQuery,
-                    onCheckedChange = { dnsParallelQuery = it }
-                )
-                SettingsSwitchItem(
-                    title = stringResource(R.string.title_pref_dns_serve_stale),
-                    summary = stringResource(R.string.summary_pref_dns_serve_stale),
-                    checked = dnsServeStale,
-                    onCheckedChange = { dnsServeStale = it }
-                )'''
-        new_c, n = re.subn(pattern, replacement, c, flags=re.DOTALL)
-        if n:
-            c = new_c
-            print("✓ SettingsActivity: inserted DNS parallel/stale switches")
-        else:
-            print("⚠ SettingsActivity: dnsHosts SettingsEditItem block not found")
-
-    write(p, c)
-
-
-# ----------------------------------------------------------------------
-# 3. strings.xml – DNS strings
-# ----------------------------------------------------------------------
-def patch_strings():
-    p = BASE / "app/src/main/res/values/strings.xml"
-    if not p.exists():
-        print("✗ strings.xml not found")
-        return
-    c = read(p)
-
-    needed = {
-        "title_pref_dns_parallel_query": "DNS Parallel Query",
-        "summary_pref_dns_parallel_query": "Enable parallel queries to all DNS servers for faster resolution",
-        "title_pref_dns_serve_stale": "DNS Serve Stale",
-        "summary_pref_dns_serve_stale": "Serve stale DNS records while refreshing in background",
-    }
-    new_strings = []
-    for k, v in needed.items():
-        if f'name="{k}"' in c:
-            continue
-        new_strings.append(f'    <string name="{k}">{v}</string>')
-
-    if not new_strings:
-        print("• strings.xml: DNS strings already present")
-        return
-
-    m = re.search(r'(\s*)</resources>', c, re.IGNORECASE)
-    if m:
-        indent, pos = m.group(1), m.start()
-        insertion = "\n" + "\n".join(new_strings) + "\n" + indent
-        c = c[:pos] + insertion + c[pos:]
-        write(p, c)
-        print(f"✓ strings.xml: added {len(new_strings)} DNS strings")
-    else:
-        print("⚠ strings.xml: </resources> not found")
-
-
-# ----------------------------------------------------------------------
-# 4. FormFields.kt – typed filter + 50-item hard cap
+# FormFields.kt – typed filter + 50-item hard cap
+# Keeps the plain Column that ExposedDropdownMenu requires (LazyColumn
+# crashes on intrinsic measurement).
 # ----------------------------------------------------------------------
 def patch_formfields():
     p = BASE / "app/src/main/java/com/v2ray/ang/ui/compose/FormFields.kt"
@@ -207,6 +86,7 @@ def patch_formfields():
     if "val visibleOptions = remember" in c:
         print("• FormFields: filtered/capped options already present")
     elif old_state in c:
+        backup_kotlin(p)
         c = c.replace(old_state, new_state, 1)
         print("✓ FormFields: added typed-text filtering + 50-item cap")
     else:
@@ -258,7 +138,7 @@ def patch_formfields():
         c = c.replace(old_menu, new_menu, 1)
         print("✓ FormFields: dropdown now uses filtered/capped list")
     else:
-        # Loose fallback
+        # Loose fallback: swap options -> visibleOptions and add heightIn
         c2 = re.sub(
             r'options\.forEach\s*\{\s*option\s*->',
             'visibleOptions.forEach { option ->',
@@ -283,13 +163,9 @@ def patch_formfields():
 # ----------------------------------------------------------------------
 def main():
     print("=" * 70)
-    print("Patcher: DNS UI toggles + FormFields dropdown optimisation")
-    print("(CoreConfigManager / V2rayConfig left untouched)")
+    print("Patcher: FormFields dropdown optimisation only")
     print("=" * 70)
     try:
-        patch_appconfig()
-        patch_settings()
-        patch_strings()
         patch_formfields()
         print("\n✅ Done.")
         print("👉 Rebuild and test.")
