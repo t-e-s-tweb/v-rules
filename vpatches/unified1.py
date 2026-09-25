@@ -2,6 +2,7 @@
 """
 v2rayNG patcher for 2dust/v2rayNG master
   • DNS Parallel Query + Serve Stale toggles       (DHR60 fb3eb6c)
+  • DNS hosts multi-IP format                     (DHR60 ec2d2da)
   • WireGuard remoteDNS fallback split fix         (ParseAddr panic)
   • FormFields dropdown performance                (typed filter + 50-cap)
 
@@ -42,11 +43,9 @@ def patch_appconfig():
         print("✗ AppConfig.kt not found")
         return
     c = read(p)
-
     if "PREF_DNS_PARALLEL_QUERY" in c and "PREF_DNS_SERVE_STALE" in c:
         print("• AppConfig: DNS pref keys already present")
         return
-
     old = '    const val PREF_DNS_HOSTS = "pref_dns_hosts"'
     new = '''    const val PREF_DNS_HOSTS = "pref_dns_hosts"
     const val PREF_DNS_PARALLEL_QUERY = "pref_dns_parallel_query"
@@ -54,9 +53,9 @@ def patch_appconfig():
     if old in c:
         c = c.replace(old, new, 1)
         write(p, c)
-        print("✓ AppConfig: added PREF_DNS_PARALLEL_QUERY + PREF_DNS_SERVE_STALE")
+        print("✓ AppConfig: added DNS pref keys")
     else:
-        print("⚠ AppConfig: PREF_DNS_HOSTS declaration not found")
+        print("⚠ AppConfig: PREF_DNS_HOSTS not found")
 
 
 # ----------------------------------------------------------------------
@@ -69,49 +68,33 @@ def patch_v2rayconfig():
         return
     c = read(p)
     changed = False
-
     if re.search(r'val\s+enableParallelQuery\s*:\s*Boolean\?', c):
-        c = re.sub(
-            r'val\s+enableParallelQuery\s*:\s*Boolean\?',
-            'var enableParallelQuery: Boolean?',
-            c
-        )
+        c = re.sub(r'val\s+enableParallelQuery\s*:\s*Boolean\?',
+                   'var enableParallelQuery: Boolean?', c)
         changed = True
         print("✓ V2rayConfig: enableParallelQuery val -> var")
     else:
         print("• V2rayConfig: enableParallelQuery already var or missing")
-
     if "serveStale" in c:
         print("• V2rayConfig: serveStale already present")
     else:
-        m = re.search(
-            r'(data class DnsBean\s*\(.*?val tag: String\? = null)\s*\)',
-            c, re.DOTALL
-        )
+        m = re.search(r'(data class DnsBean\s*\(.*?val tag: String\? = null)\s*\)',
+                      c, re.DOTALL)
         if m:
-            c = (
-                c[:m.end(1)]
-                + ',\n        var serveStale: Boolean? = null\n    )'
-                + c[m.end():]
-            )
+            c = (c[:m.end(1)]
+                 + ',\n        var serveStale: Boolean? = null\n    )'
+                 + c[m.end():])
             changed = True
             print("✓ V2rayConfig: added serveStale to DnsBean")
         else:
-            print("⚠ V2rayConfig: DnsBean not matched for serveStale")
-
+            print("⚠ V2rayConfig: DnsBean not matched")
     if changed:
         backup_kotlin(p)
         write(p, c)
 
 
 # ----------------------------------------------------------------------
-# 3. CoreConfigManager.kt
-#
-#    IMPORTANT: the DnsBean construction appears TWICE in the file —
-#    once inside a /* ... */ commented legacy block, once in the live
-#    configureDns(configContext, ...) method. Both are byte-for-byte
-#    identical, so we must replace ALL occurrences (no count), or we
-#    will rewrite the dead comment and leave the live code untouched.
+# 3. CoreConfigManager.kt – DnsBean pref-driven
 # ----------------------------------------------------------------------
 def patch_coreconfigmanager():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
@@ -119,11 +102,9 @@ def patch_coreconfigmanager():
         print("✗ CoreConfigManager.kt not found")
         return
     c = read(p)
-
     if "// (dns-prefs-injected)" in c:
         print("• CoreConfigManager: DNS prefs already injected")
         return
-
     old = (
         "        v2rayConfig.dns = V2rayConfig.DnsBean(\n"
         "            servers = servers,\n"
@@ -142,21 +123,107 @@ def patch_coreconfigmanager():
         "            serveStale = if (MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_SERVE_STALE, false)) true else null\n"
         "        )"
     )
-
     if old in c:
         backup_kotlin(p)
-        n = c.count(old)
-        c = c.replace(old, new)          # replace ALL occurrences
+        c = c.replace(old, new, 1)
         write(p, c)
-        print(f"✓ CoreConfigManager: DnsBean rewritten ({n} occurrence(s), "
-              f"live + commented)")
+        print("✓ CoreConfigManager: DnsBean rewritten with pref-driven fields")
     else:
-        print("⚠ CoreConfigManager: exact DnsBean literal not found — "
-              "upstream may have reformatted the call")
+        print("⚠ CoreConfigManager: exact DnsBean literal not found")
 
 
 # ----------------------------------------------------------------------
-# 4. CoreOutboundBuilder.kt – WireGuard remoteDNS fallback split
+# 4. CoreConfigManager.kt – DNS hosts multi-IP format (DHR60 ec2d2da)
+#    Replaces the comma/first-colon parser in the live
+#    buildDnsHostsFromRoutingRules with a line-based parser that
+#    accepts multiple space-separated IPs per domain.
+# ----------------------------------------------------------------------
+def patch_dns_hosts_format():
+    p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
+    if not p.exists():
+        print("✗ CoreConfigManager.kt not found")
+        return
+    c = read(p)
+
+    if "// (dns-hosts-multi-ip)" in c:
+        print("• CoreConfigManager: DNS hosts multi-IP format already applied")
+        return
+
+    old = r'''        val userHosts = MmkvManager.decodeSettingsString(AppConfig.PREF_DNS_HOSTS)
+        if (userHosts.isNotNullEmpty()) {
+            val userHostsMap = userHosts?.split(",").orEmpty()
+                .filter { it.isNotBlank() && it.contains(":") }
+                .associate {
+                    // Use limit = 2 to split only at the first colon.
+                    // This ensures that IPv6 addresses (which contain multiple colons)
+                    // are preserved entirely in the second part.
+                    val parts = it.split(":", limit = 2)
+                    parts[0].trim() to parts[1].trim()
+                }
+            hosts.putAll(userHostsMap)
+        }'''
+
+    new = r'''        // (dns-hosts-multi-ip)
+        val userHosts = MmkvManager.decodeSettingsString(AppConfig.PREF_DNS_HOSTS)
+        if (userHosts.isNotNullEmpty()) {
+            val userHostsMap = userHosts?.lines()
+                ?.filter { it.isNotEmpty() }
+                ?.filter { it.contains(" ") }
+                ?.associate { line ->
+                    val parts = line.trim().split("\\s+".toRegex())
+                    val key = parts[0]
+                    val values = parts.drop(1)
+                    key to if (values.size == 1) values[0] else values
+                }
+            if (userHostsMap != null) hosts.putAll(userHostsMap)
+        }'''
+
+    if old in c:
+        backup_kotlin(p)
+        c = c.replace(old, new, 1)
+        write(p, c)
+        print("✓ CoreConfigManager: DNS hosts parser rewritten (multi-IP, line-based)")
+    else:
+        print("⚠ CoreConfigManager: live userHosts parser not found — "
+              "upstream may have reformatted it")
+
+
+# ----------------------------------------------------------------------
+# 5. strings.xml – update the DNS hosts field hint
+# ----------------------------------------------------------------------
+def patch_dns_hosts_hint():
+    targets = {
+        BASE / "app/src/main/res/values/strings.xml": (
+            'DNS hosts (format: "domain address1 address2", one per line)'
+            r'\ndomain address1 address2'
+        ),
+        BASE / "app/src/main/res/values-zh-rCN/strings.xml": (
+            'DNS hosts (格式: "域名 地址1 地址2" 每行一个)'
+            r'\ndomain address1 address2'
+        ),
+    }
+    pat = re.compile(r'<string name="title_pref_dns_hosts">.*?</string>', re.DOTALL)
+
+    for p, value in targets.items():
+        if not p.exists():
+            print(f"• {p.name}: not present, skipping")
+            continue
+        c = read(p)
+        m = pat.search(c)
+        if not m:
+            print(f"⚠ {p.name}: title_pref_dns_hosts not found")
+            continue
+        new = f'<string name="title_pref_dns_hosts">{value}</string>'
+        if m.group(0) == new:
+            print(f"• {p.name}: hint already updated")
+            continue
+        c = pat.sub(new, c, count=1)
+        write(p, c)
+        print(f"✓ {p.name}: updated title_pref_dns_hosts hint")
+
+
+# ----------------------------------------------------------------------
+# 6. CoreOutboundBuilder.kt – WireGuard remoteDNS fallback split
 # ----------------------------------------------------------------------
 def patch_wireguard_remotedns():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreOutboundBuilder.kt"
@@ -164,39 +231,31 @@ def patch_wireguard_remotedns():
         print("✗ CoreOutboundBuilder.kt not found")
         return
     c = read(p)
-
     old1 = "?: listOf(AppConfig.WIREGUARD_LOCAL_REMOTE_DNS)"
-    new1 = (
-        "?: AppConfig.WIREGUARD_LOCAL_REMOTE_DNS"
-        ".split(\",\").map { it.trim() }.filter { it.isNotEmpty() }"
-    )
+    new1 = ('?: AppConfig.WIREGUARD_LOCAL_REMOTE_DNS'
+            '.split(",").map { it.trim() }.filter { it.isNotEmpty() }')
     old2 = "listOf(AppConfig.WIREGUARD_LOCAL_REMOTE_DNS)"
-
     if new1 in c:
         print("• CoreOutboundBuilder: fallback already fixed")
         return
-
     if old1 in c:
         backup_kotlin(p)
-        c = c.replace(old1, new1)
+        c = c.replace(old1, new1, 1)
         write(p, c)
-        print("✓ CoreOutboundBuilder: split fallback (with ?:)")
+        print("✓ CoreOutboundBuilder: split fallback")
     elif old2 in c:
         backup_kotlin(p)
-        c = c.replace(
-            old2,
-            "AppConfig.WIREGUARD_LOCAL_REMOTE_DNS"
-            ".split(\",\").map { it.trim() }.filter { it.isNotEmpty() }"
-        )
+        c = c.replace(old2,
+                      'AppConfig.WIREGUARD_LOCAL_REMOTE_DNS'
+                      '.split(",").map { it.trim() }.filter { it.isNotEmpty() }', 1)
         write(p, c)
         print("✓ CoreOutboundBuilder: split fallback")
     else:
-        print("⚠ CoreOutboundBuilder: fallback pattern not found — "
-              "inspect manually")
+        print("⚠ CoreOutboundBuilder: fallback pattern not found")
 
 
 # ----------------------------------------------------------------------
-# 5. SettingsActivity.kt – DNS state + switches
+# 7. SettingsActivity.kt – DNS state + switches
 # ----------------------------------------------------------------------
 def patch_settings():
     p = BASE / "app/src/main/java/com/v2ray/ang/ui/settings/SettingsActivity.kt"
@@ -243,15 +302,15 @@ def patch_settings():
         new_c, n = re.subn(pattern, replacement, c, flags=re.DOTALL)
         if n:
             c = new_c
-            print("✓ SettingsActivity: inserted DNS parallel/stale switches")
+            print("✓ SettingsActivity: inserted DNS switches")
         else:
-            print("⚠ SettingsActivity: dnsHosts SettingsEditItem block not found")
+            print("⚠ SettingsActivity: dnsHosts SettingsEditItem not found")
 
     write(p, c)
 
 
 # ----------------------------------------------------------------------
-# 6. strings.xml – DNS strings
+# 8. strings.xml – DNS pref strings
 # ----------------------------------------------------------------------
 def patch_strings():
     p = BASE / "app/src/main/res/values/strings.xml"
@@ -259,7 +318,6 @@ def patch_strings():
         print("✗ strings.xml not found")
         return
     c = read(p)
-
     needed = {
         "title_pref_dns_parallel_query": "DNS Parallel Query",
         "summary_pref_dns_parallel_query": "Enable parallel queries to all DNS servers for faster resolution",
@@ -271,16 +329,13 @@ def patch_strings():
         if f'name="{k}"' in c:
             continue
         new_strings.append(f'    <string name="{k}">{v}</string>')
-
     if not new_strings:
         print("• strings.xml: DNS strings already present")
         return
-
     m = re.search(r'(\s*)</resources>', c, re.IGNORECASE)
     if m:
         indent, pos = m.group(1), m.start()
-        insertion = "\n" + "\n".join(new_strings) + "\n" + indent
-        c = c[:pos] + insertion + c[pos:]
+        c = c[:pos] + "\n" + "\n".join(new_strings) + "\n" + indent + c[pos:]
         write(p, c)
         print(f"✓ strings.xml: added {len(new_strings)} DNS strings")
     else:
@@ -288,7 +343,7 @@ def patch_strings():
 
 
 # ----------------------------------------------------------------------
-# 7. FormFields.kt – typed filter + 50-item hard cap
+# 9. FormFields.kt – typed filter + 50-item hard cap
 # ----------------------------------------------------------------------
 def patch_formfields():
     p = BASE / "app/src/main/java/com/v2ray/ang/ui/compose/FormFields.kt"
@@ -339,7 +394,7 @@ def patch_formfields():
         print("• FormFields: filtered/capped options already present")
     elif old_state in c:
         c = c.replace(old_state, new_state, 1)
-        print("✓ FormFields: added typed-text filtering + 50-item cap")
+        print("✓ FormFields: added filtering + 50-item cap")
     else:
         print("⚠ FormFields: state block not found")
 
@@ -381,29 +436,23 @@ def patch_formfields():
                 )
             }
         }'''
-
     if "visibleOptions.forEach" in c:
-        print("• FormFields: dropdown menu already updated")
+        print("• FormFields: dropdown already updated")
     elif old_menu in c:
         c = c.replace(old_menu, new_menu, 1)
-        print("✓ FormFields: dropdown now uses filtered/capped list")
+        print("✓ FormFields: dropdown uses filtered/capped list")
     else:
-        c2 = re.sub(
-            r'options\.forEach\s*\{\s*option\s*->',
-            'visibleOptions.forEach { option ->',
-            c
-        )
+        c2 = re.sub(r'options\.forEach\s*\{\s*option\s*->',
+                    'visibleOptions.forEach { option ->', c)
         if c2 != c:
             c = c2
             c = c.replace(
                 'Modifier.verticalScrollbar(menuScrollState),\n            scrollState = menuScrollState,',
                 'Modifier\n                .verticalScrollbar(menuScrollState)\n                .heightIn(max = 300.dp),\n            scrollState = menuScrollState,',
-                1
-            )
+                1)
             print("✓ FormFields: dropdown updated (regex)")
         else:
             print("⚠ FormFields: ExposedDropdownMenu block not found")
-
     write(p, c)
 
 
@@ -412,12 +461,14 @@ def patch_formfields():
 # ----------------------------------------------------------------------
 def main():
     print("=" * 70)
-    print("Patcher: DNS toggles + WireGuard remoteDNS + FormFields")
+    print("Patcher: DNS toggles + DNS hosts multi-IP + WireGuard + FormFields")
     print("=" * 70)
     try:
         patch_appconfig()
         patch_v2rayconfig()
         patch_coreconfigmanager()
+        patch_dns_hosts_format()
+        patch_dns_hosts_hint()
         patch_wireguard_remotedns()
         patch_settings()
         patch_strings()
