@@ -108,10 +108,9 @@ def patch_v2rayconfig():
 # ----------------------------------------------------------------------
 # 3. CoreConfigManager.kt
 #    3a. DNS ordering fix (DHR60 acfaf1c)
-#    3b. Inject pref toggles right after initV2rayConfig(configContext),
-#        where v2rayConfig.dns already exists (parsed from template).
-#        Upstream's configureDns only mutates the existing DnsBean; it
-#        never constructs one, so we must mutate post-init.
+#    3b. Rewrite the v2rayConfig.dns = V2rayConfig.DnsBean(...) call
+#        itself — this is the only place upstream sets enableParallelQuery,
+#        and the only reliable anchor for injecting serveStale.
 # ----------------------------------------------------------------------
 def patch_coreconfigmanager():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
@@ -121,7 +120,7 @@ def patch_coreconfigmanager():
     c = read(p)
     changed = False
 
-    # ---- 3a. DNS ordering ----
+    # ---- 3a. DNS ordering (DHR60 acfaf1c) ----
     if "// (dns-order-fixed)" not in c:
         remote_line = "        remoteDns.forEach { servers.add(it) }\n"
         dom_pat = re.compile(r'domesticDns\.forEach\s*\{.*?\}\s*\n', re.DOTALL)
@@ -144,51 +143,44 @@ def patch_coreconfigmanager():
     else:
         print("• CoreConfigManager: DNS ordering already fixed")
 
-    # ---- 3b. Pref wiring after initV2rayConfig ----
+    # ---- 3b. Replace DnsBean construction ----
     if "// (dns-prefs-injected)" in c:
-        print("• CoreConfigManager: DNS prefs already injected")
+        print("• CoreConfigManager: DnsBean already pref-aware")
     else:
-        # Try several anchor forms that might appear in buildUnifiedConfig
-        anchor_candidates = [
-            "initV2rayConfig(configContext)\n",
-            "initV2rayConfig(configContext)\r\n",
-        ]
-        anchor = None
-        for cand in anchor_candidates:
-            if cand in c:
-                anchor = cand
-                break
-
-        if not anchor:
-            # Looser: any initV2rayConfig(...) call
-            m_init = re.search(r'initV2rayConfig\([^)]*\)', c)
-            if m_init:
-                anchor = m_init.group(0)
-                insert_at = m_init.end()
-                print(f"• CoreConfigManager: using loose anchor '{anchor}'")
-            else:
-                print("⚠ CoreConfigManager: initV2rayConfig call not found")
-                insert_at = -1
+        # Match the constructor call robustly:
+        #   <indent>v2rayConfig.dns = V2rayConfig.DnsBean(
+        #       ...
+        #   <indent>)
+        # Using (?P=indent) ensures we find the closing paren on the same
+        # indentation as the start of the statement.
+        pat = re.compile(
+            r'(?P<indent>[ \t]*)v2rayConfig\.dns\s*=\s*V2rayConfig\.DnsBean\s*\('
+            r'.*?'
+            r'\n(?P=indent)\)',
+            re.DOTALL
+        )
+        m = pat.search(c)
+        if not m:
+            print("⚠ CoreConfigManager: v2rayConfig.dns = V2rayConfig.DnsBean(...) "
+                  "not found — inspect manually")
         else:
-            insert_at = c.find(anchor) + len(anchor)
-
-        if anchor and insert_at != -1:
-            injected = (
-                "        // (dns-prefs-injected)\n"
-                "        v2rayConfig.dns?.apply {\n"
-                "            if (MmkvManager.decodeSettingsBool("
-                "AppConfig.PREF_DNS_PARALLEL_QUERY, false)) {\n"
-                "                enableParallelQuery = true\n"
-                "            }\n"
-                "            if (MmkvManager.decodeSettingsBool("
-                "AppConfig.PREF_DNS_SERVE_STALE, false)) {\n"
-                "                serveStale = true\n"
-                "            }\n"
-                "        }\n"
+            indent = m.group("indent")
+            arg_indent = indent + "    "
+            replacement = (
+                f"{indent}// (dns-prefs-injected)\n"
+                f"{indent}v2rayConfig.dns = V2rayConfig.DnsBean(\n"
+                f"{arg_indent}servers = servers,\n"
+                f"{arg_indent}hosts = hosts,\n"
+                f"{arg_indent}tag = AppConfig.TAG_DNS,\n"
+                f"{arg_indent}enableParallelQuery = if (MmkvManager.decodeSettingsBool("
+                f"AppConfig.PREF_DNS_PARALLEL_QUERY, false)) true else null,\n"
+                f"{arg_indent}serveStale = if (MmkvManager.decodeSettingsBool("
+                f"AppConfig.PREF_DNS_SERVE_STALE, false)) true else null\n"
+                f"{indent})"
             )
-            c = c[:insert_at] + injected + c[insert_at:]
+            c = c[:m.start()] + replacement + c[m.end():]
             changed = True
-            print("✓ CoreConfigManager: injected DNS prefs after initV2rayConfig")
+            print("✓ CoreConfigManager: DnsBean construction rewritten")
 
     if changed:
         backup_kotlin(p)
@@ -197,7 +189,6 @@ def patch_coreconfigmanager():
 
 # ----------------------------------------------------------------------
 # 4. CoreOutboundBuilder.kt – WireGuard remoteDNS fallback split
-#    Fixes: panic: ParseAddr("1.1.1.1,1.0.0.1,...")
 # ----------------------------------------------------------------------
 def patch_wireguard_remotedns():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreOutboundBuilder.kt"
@@ -245,7 +236,6 @@ def patch_settings():
         return
     c = read(p)
 
-    # 5a. State declarations
     old_decl = 'var dnsHosts by rememberMmkvString(AppConfig.PREF_DNS_HOSTS, "")'
     new_decl = old_decl + """
     var dnsParallelQuery by rememberMmkvBool(AppConfig.PREF_DNS_PARALLEL_QUERY, false)
@@ -258,7 +248,6 @@ def patch_settings():
     else:
         print("⚠ SettingsActivity: dnsHosts declaration not found")
 
-    # 5b. UI switches
     if "title_pref_dns_parallel_query" in c:
         print("• SettingsActivity: switches already present")
     else:
