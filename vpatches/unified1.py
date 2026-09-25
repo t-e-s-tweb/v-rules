@@ -61,7 +61,7 @@ def patch_appconfig():
 
 
 # ----------------------------------------------------------------------
-# 2. V2rayConfig.kt – add serveStale to DnsBean
+# 2. V2rayConfig.kt – enableParallelQuery val → var, add serveStale
 # ----------------------------------------------------------------------
 def patch_v2rayconfig():
     p = BASE / "app/src/main/java/com/v2ray/ang/dto/V2rayConfig.kt"
@@ -69,54 +69,46 @@ def patch_v2rayconfig():
         print("✗ V2rayConfig.kt not found")
         return
     c = read(p)
+    changed = False
 
-    if "var serveStale" in c or "val serveStale" in c:
-        print("• V2rayConfig: serveStale already present")
-        return
-
-    old_dns = '''data class DnsBean(
-        var servers: ArrayList<Any>? = null,
-        var hosts: Map<String, Any>? = null,
-        val clientIp: String? = null,
-        val disableCache: Boolean? = null,
-        val queryStrategy: String? = null,
-        val enableParallelQuery: Boolean? = null,
-        val tag: String? = null
-    )'''
-    new_dns = '''data class DnsBean(
-        var servers: ArrayList<Any>? = null,
-        var hosts: Map<String, Any>? = null,
-        val clientIp: String? = null,
-        val disableCache: Boolean? = null,
-        val queryStrategy: String? = null,
-        var enableParallelQuery: Boolean? = null,
-        val tag: String? = null,
-        var serveStale: Boolean? = null
-    )'''
-    if old_dns in c:
-        c = c.replace(old_dns, new_dns, 1)
-        write(p, c)
-        print("✓ V2rayConfig: added serveStale to DnsBean")
-        return
-
-    # Tolerant fallback: match DnsBean ending with tag = String? = null
-    m = re.search(
-        r'(data class DnsBean\s*\(.*?val tag: String\? = null)\s*\)',
-        c, re.DOTALL
-    )
-    if m:
-        replacement = m.group(1) + ',\n        var serveStale: Boolean? = null\n    )'
-        c = c[:m.start()] + replacement + c[m.end():]
-        write(p, c)
-        print("✓ V2rayConfig: added serveStale (regex)")
+    # 2a. enableParallelQuery must be mutable so we can flip it at runtime
+    if re.search(r'val\s+enableParallelQuery\s*:\s*Boolean\?', c):
+        c = re.sub(
+            r'val\s+enableParallelQuery\s*:\s*Boolean\?',
+            'var enableParallelQuery: Boolean?',
+            c
+        )
+        changed = True
+        print("✓ V2rayConfig: enableParallelQuery val -> var")
     else:
-        print("⚠ V2rayConfig: DnsBean not matched")
+        print("• V2rayConfig: enableParallelQuery already var or missing")
+
+    # 2b. Add serveStale if absent
+    if "serveStale" in c:
+        print("• V2rayConfig: serveStale already present")
+    else:
+        m = re.search(
+            r'(data class DnsBean\s*\(.*?val tag: String\? = null)\s*\)',
+            c, re.DOTALL
+        )
+        if m:
+            c = (
+                c[:m.end(1)]
+                + ',\n        var serveStale: Boolean? = null\n    )'
+                + c[m.end():]
+            )
+            changed = True
+            print("✓ V2rayConfig: added serveStale to DnsBean")
+        else:
+            print("⚠ V2rayConfig: DnsBean not matched for serveStale")
+
+    if changed:
+        backup_kotlin(p)
+        write(p, c)
 
 
 # ----------------------------------------------------------------------
-# 3. CoreConfigManager.kt
-#    3a. DNS ordering fix (acfaf1c): move remoteDns.forEach after domestic
-#    3b. Wire in PREF_DNS_PARALLEL_QUERY / PREF_DNS_SERVE_STALE (fb3eb6c)
+# 3. CoreConfigManager.kt – DNS ordering + pref toggles
 # ----------------------------------------------------------------------
 def patch_coreconfigmanager():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
@@ -124,124 +116,71 @@ def patch_coreconfigmanager():
         print("✗ CoreConfigManager.kt not found")
         return
     c = read(p)
-
     changed = False
-    backup_kotlin(p)
 
-    # ---- 3a. DNS ordering fix ----
-    # Move `remoteDns.forEach { servers.add(it) }` to after the
-    # domestic DNS block (before the DnsBean assignment or method end).
-    remote_line = "        remoteDns.forEach { servers.add(it) }"
-    if remote_line in c and "// (dns-order-fixed)" not in c:
-        # Remove the original occurrence
-        c = c.replace(remote_line + "\n", "", 1)
-
-        # Re-insert after the domestic DNS / cnRouting block.
-        # Anchor: just before `v2rayConfig.dns =` OR before the method's
-        # closing brace if no DnsBean assignment exists.
-        anchor_pat = re.compile(
-            r'(\n\s*v2rayConfig\.dns\s*=\s*V2rayConfig\.DnsBean)'
-        )
-        m_anchor = anchor_pat.search(c)
-        if m_anchor:
-            insert_at = m_anchor.start()
-        else:
-            # Fall back to end of configureDns
-            sig = "private fun configureDns("
-            pos = c.find(sig)
-            if pos == -1:
-                print("⚠ CoreConfigManager: configureDns not found for reorder")
-                write(p, c)
-                return
-            open_brace = c.find('{', pos)
-            brace_count = 1
-            i = open_brace + 1
-            while i < len(c) and brace_count > 0:
-                if c[i] == '{':
-                    brace_count += 1
-                elif c[i] == '}':
-                    brace_count -= 1
-                i += 1
-            insert_at = i - 1
-
-        c = (
-            c[:insert_at]
-            + "\n        // (dns-order-fixed)\n"
-            + remote_line
-            + "\n"
-            + c[insert_at:]
-        )
-        changed = True
-        print("✓ CoreConfigManager: remoteDns added after domestic DNS")
-    elif "// (dns-order-fixed)" in c:
-        print("• CoreConfigManager: DNS ordering already fixed")
-
-    # ---- 3b. Serve-stale / parallel-query pref wiring ----
-    if "PREF_DNS_PARALLEL_QUERY" not in c or "PREF_DNS_SERVE_STALE" not in c:
-        # Try to inject after the DnsBean assignment
-        dns_pat = re.compile(
-            r'(v2rayConfig\.dns\s*=\s*V2rayConfig\.DnsBean\s*\(.*?\))',
+    # ---- 3a. DNS ordering fix (DHR60 acfaf1c) ----
+    if "// (dns-order-fixed)" not in c:
+        remote_line = "        remoteDns.forEach { servers.add(it) }\n"
+        dom_pat = re.compile(
+            r'domesticDns\.forEach\s*\{.*?\}\s*\n',
             re.DOTALL
         )
-        m = dns_pat.search(c)
-        if m:
-            line_start = c.rfind('\n', 0, m.start()) + 1
-            indent = c[line_start:m.start()]
+        m_dom = dom_pat.search(c)
+        if m_dom and remote_line in c:
+            c = c.replace(remote_line, "", 1)
+            insert_at = m_dom.end()
+            c = (
+                c[:insert_at]
+                + "        // (dns-order-fixed)\n"
+                + remote_line
+                + c[insert_at:]
+            )
+            changed = True
+            print("✓ CoreConfigManager: remoteDns reordered after domestic")
+        elif m_dom:
+            print("• CoreConfigManager: remoteDns literal not present (skipping reorder)")
+        else:
+            print("⚠ CoreConfigManager: domesticDns block not found for reorder")
+    else:
+        print("• CoreConfigManager: DNS ordering already fixed")
+
+    # ---- 3b. Inject DNS pref toggles at the START of configureDns ----
+    if "// DNS toggles (patched)" in c:
+        print("• CoreConfigManager: DNS toggles already wired")
+    else:
+        sig_pat = re.compile(
+            r'fun configureDns\(\s*v2rayConfig\s*:\s*V2rayConfig[^)]*\)\s*\{',
+            re.DOTALL
+        )
+        m = sig_pat.search(c)
+        if not m:
+            print("⚠ CoreConfigManager: configureDns signature not found")
+        else:
+            insert_at = m.end()
+            indent = "        "
             injected = f'''
 {indent}// DNS toggles (patched)
-{indent}if (MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_SERVE_STALE, false) == true) {{
-{indent}    v2rayConfig.dns?.serveStale = true
+{indent}v2rayConfig.dns?.apply {{
+{indent}    if (MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_PARALLEL_QUERY, false)) {{
+{indent}        enableParallelQuery = true
+{indent}    }}
+{indent}    if (MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_SERVE_STALE, false)) {{
+{indent}        serveStale = true
+{indent}    }}
 {indent}}}
-{indent}if (MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_PARALLEL_QUERY, false) == true) {{
-{indent}    v2rayConfig.dns?.enableParallelQuery = true
-{indent}}}'''
-            c = c[:m.end()] + injected + c[m.end():]
+'''
+            c = c[:insert_at] + injected + c[insert_at:]
             changed = True
-            print("✓ CoreConfigManager: wired PREF_DNS_PARALLEL_QUERY + PREF_DNS_SERVE_STALE")
-        else:
-            # No DnsBean assignment in this file – inject at end of configureDns
-            sig = "private fun configureDns("
-            pos = c.find(sig)
-            if pos == -1:
-                print("⚠ CoreConfigManager: configureDns not found for pref wiring")
-            else:
-                open_brace = c.find('{', pos)
-                brace_count = 1
-                i = open_brace + 1
-                while i < len(c) and brace_count > 0:
-                    if c[i] == '{':
-                        brace_count += 1
-                    elif c[i] == '}':
-                        brace_count -= 1
-                    i += 1
-                insert_at = i - 1
-                line_start = c.rfind('\n', 0, open_brace + 1) + 1
-                indent = c[line_start:open_brace + 1]
-                if not indent.strip():
-                    indent = "        "
-                injected = f'''
-{indent}// DNS toggles (patched)
-{indent}if (MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_SERVE_STALE, false) == true) {{
-{indent}    v2rayConfig.dns?.serveStale = true
-{indent}}}
-{indent}if (MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_PARALLEL_QUERY, false) == true) {{
-{indent}    v2rayConfig.dns?.enableParallelQuery = true
-{indent}}}'''
-                c = c[:insert_at] + injected + c[insert_at:]
-                changed = True
-                print("✓ CoreConfigManager: wired DNS prefs at end of configureDns")
-    else:
-        print("• CoreConfigManager: DNS prefs already wired")
+            print("✓ CoreConfigManager: injected DNS toggles at start of configureDns")
 
     if changed:
+        backup_kotlin(p)
         write(p, c)
 
 
 # ----------------------------------------------------------------------
 # 4. CoreOutboundBuilder.kt – WireGuard remoteDNS fallback split
 #    Fixes: panic: ParseAddr("1.1.1.1,1.0.0.1,...")
-#    The fallback listOf(AppConfig.WIREGUARD_LOCAL_REMOTE_DNS) puts the
-#    whole comma-separated string into a single list element.
 # ----------------------------------------------------------------------
 def patch_wireguard_remotedns():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreOutboundBuilder.kt"
@@ -266,7 +205,6 @@ def patch_wireguard_remotedns():
         write(p, c)
         print("✓ CoreOutboundBuilder: split WIREGUARD_LOCAL_REMOTE_DNS fallback")
     else:
-        # Looser: the fallback may span lines
         m = re.search(
             r'\?:\s*listOf\(\s*AppConfig\.WIREGUARD_LOCAL_REMOTE_DNS\s*\)',
             c
