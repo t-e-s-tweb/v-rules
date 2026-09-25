@@ -71,6 +71,7 @@ def patch_v2rayconfig():
     c = read(p)
     changed = False
 
+    # 2a. enableParallelQuery must be mutable for runtime override
     if re.search(r'val\s+enableParallelQuery\s*:\s*Boolean\?', c):
         c = re.sub(
             r'val\s+enableParallelQuery\s*:\s*Boolean\?',
@@ -82,6 +83,7 @@ def patch_v2rayconfig():
     else:
         print("• V2rayConfig: enableParallelQuery already var or missing")
 
+    # 2b. Add serveStale if absent
     if "serveStale" in c:
         print("• V2rayConfig: serveStale already present")
     else:
@@ -107,10 +109,13 @@ def patch_v2rayconfig():
 
 # ----------------------------------------------------------------------
 # 3. CoreConfigManager.kt
-#    3a. DNS ordering fix (DHR60 acfaf1c)
-#    3b. Rewrite the v2rayConfig.dns = V2rayConfig.DnsBean(...) call
-#        itself — this is the only place upstream sets enableParallelQuery,
-#        and the only reliable anchor for injecting serveStale.
+#
+#    Strategy: locate the DnsBean construction by literal string search,
+#    then walk parentheses to find its matching closing ')', and insert
+#    the pref checks immediately after it.
+#
+#    This is robust against upstream formatting changes and works even
+#    though the file is too large for the display proxy to show fully.
 # ----------------------------------------------------------------------
 def patch_coreconfigmanager():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
@@ -120,7 +125,7 @@ def patch_coreconfigmanager():
     c = read(p)
     changed = False
 
-    # ---- 3a. DNS ordering (DHR60 acfaf1c) ----
+    # ---- 3a. DNS ordering fix (DHR60 acfaf1c) ----
     if "// (dns-order-fixed)" not in c:
         remote_line = "        remoteDns.forEach { servers.add(it) }\n"
         dom_pat = re.compile(r'domesticDns\.forEach\s*\{.*?\}\s*\n', re.DOTALL)
@@ -143,44 +148,52 @@ def patch_coreconfigmanager():
     else:
         print("• CoreConfigManager: DNS ordering already fixed")
 
-    # ---- 3b. Replace DnsBean construction ----
+    # ---- 3b. Insert pref checks after DnsBean construction ----
     if "// (dns-prefs-injected)" in c:
-        print("• CoreConfigManager: DnsBean already pref-aware")
+        print("• CoreConfigManager: DNS prefs already injected")
     else:
-        # Match the constructor call robustly:
-        #   <indent>v2rayConfig.dns = V2rayConfig.DnsBean(
-        #       ...
-        #   <indent>)
-        # Using (?P=indent) ensures we find the closing paren on the same
-        # indentation as the start of the statement.
-        pat = re.compile(
-            r'(?P<indent>[ \t]*)v2rayConfig\.dns\s*=\s*V2rayConfig\.DnsBean\s*\('
-            r'.*?'
-            r'\n(?P=indent)\)',
-            re.DOTALL
-        )
-        m = pat.search(c)
-        if not m:
-            print("⚠ CoreConfigManager: v2rayConfig.dns = V2rayConfig.DnsBean(...) "
-                  "not found — inspect manually")
+        # Find the construction by literal substring
+        marker = "v2rayConfig.dns = V2rayConfig.DnsBean("
+        idx = c.find(marker)
+        if idx == -1:
+            print("⚠ CoreConfigManager: DnsBean construction not found "
+                  "(file may have been refactored)")
         else:
-            indent = m.group("indent")
-            arg_indent = indent + "    "
-            replacement = (
-                f"{indent}// (dns-prefs-injected)\n"
-                f"{indent}v2rayConfig.dns = V2rayConfig.DnsBean(\n"
-                f"{arg_indent}servers = servers,\n"
-                f"{arg_indent}hosts = hosts,\n"
-                f"{arg_indent}tag = AppConfig.TAG_DNS,\n"
-                f"{arg_indent}enableParallelQuery = if (MmkvManager.decodeSettingsBool("
-                f"AppConfig.PREF_DNS_PARALLEL_QUERY, false)) true else null,\n"
-                f"{arg_indent}serveStale = if (MmkvManager.decodeSettingsBool("
-                f"AppConfig.PREF_DNS_SERVE_STALE, false)) true else null\n"
-                f"{indent})"
-            )
-            c = c[:m.start()] + replacement + c[m.end():]
-            changed = True
-            print("✓ CoreConfigManager: DnsBean construction rewritten")
+            # Walk from the opening '(' to its matching ')'
+            open_paren = c.find("(", idx)
+            if open_paren == -1:
+                print("⚠ CoreConfigManager: no opening paren after marker")
+            else:
+                depth = 1
+                i = open_paren + 1
+                while i < len(c) and depth > 0:
+                    ch = c[i]
+                    if ch == '(':
+                        depth += 1
+                    elif ch == ')':
+                        depth -= 1
+                    i += 1
+                # i is now just past the matching ')'
+                if depth != 0:
+                    print("⚠ CoreConfigManager: unbalanced parentheses")
+                else:
+                    # Determine indentation from the line starting the marker
+                    line_start = c.rfind('\n', 0, idx) + 1
+                    indent = c[line_start:idx]
+                    injected = (
+                        f"\n{indent}// (dns-prefs-injected)\n"
+                        f"{indent}if (MmkvManager.decodeSettingsBool("
+                        f"AppConfig.PREF_DNS_SERVE_STALE, false) == true) {{\n"
+                        f"{indent}    v2rayConfig.dns?.serveStale = true\n"
+                        f"{indent}}}\n"
+                        f"{indent}if (MmkvManager.decodeSettingsBool("
+                        f"AppConfig.PREF_DNS_PARALLEL_QUERY, false) == true) {{\n"
+                        f"{indent}    v2rayConfig.dns?.enableParallelQuery = true\n"
+                        f"{indent}}}"
+                    )
+                    c = c[:i] + injected + c[i:]
+                    changed = True
+                    print("✓ CoreConfigManager: injected DNS prefs after DnsBean")
 
     if changed:
         backup_kotlin(p)
@@ -197,9 +210,9 @@ def patch_wireguard_remotedns():
         return
     c = read(p)
 
-    old_fallback = "?: listOf(AppConfig.WIREGUARD_LOCAL_REMOTE_DNS)"
+    old_fallback = "listOf(AppConfig.WIREGUARD_LOCAL_REMOTE_DNS)"
     new_fallback = (
-        "?: AppConfig.WIREGUARD_LOCAL_REMOTE_DNS"
+        "AppConfig.WIREGUARD_LOCAL_REMOTE_DNS"
         ".split(\",\").map { it.trim() }.filter { it.isNotEmpty() }"
     )
 
@@ -213,17 +226,21 @@ def patch_wireguard_remotedns():
         write(p, c)
         print("✓ CoreOutboundBuilder: split WIREGUARD_LOCAL_REMOTE_DNS fallback")
     else:
-        m = re.search(
-            r'\?:\s*listOf\(\s*AppConfig\.WIREGUARD_LOCAL_REMOTE_DNS\s*\)',
-            c
-        )
-        if m:
+        # Try the version with `?:` prefix
+        old2 = "?: listOf(AppConfig.WIREGUARD_LOCAL_REMOTE_DNS)"
+        if old2 in c:
             backup_kotlin(p)
-            c = c[:m.start()] + new_fallback + c[m.end():]
+            c = c.replace(
+                old2,
+                "?: AppConfig.WIREGUARD_LOCAL_REMOTE_DNS"
+                ".split(\",\").map { it.trim() }.filter { it.isNotEmpty() }",
+                1
+            )
             write(p, c)
-            print("✓ CoreOutboundBuilder: split fallback (regex)")
+            print("✓ CoreOutboundBuilder: split fallback (with ?:)")
         else:
-            print("⚠ CoreOutboundBuilder: remoteDNS fallback pattern not found")
+            print("⚠ CoreOutboundBuilder: remoteDNS fallback pattern not found "
+                  "(check manually)")
 
 
 # ----------------------------------------------------------------------
