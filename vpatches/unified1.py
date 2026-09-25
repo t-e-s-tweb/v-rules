@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
 v2rayNG patcher for 2dust/v2rayNG master
-  • DNS Parallel Query + Serve Stale toggles
+  • DNS Parallel Query + Serve Stale UI toggles (prefs + strings + switches)
   • FormFields dropdown performance (typed filter + 50-item hard cap)
 
-Reference patches (DHR60/v2rayNG self_use_build):
-  ec2d2da  perf. dns host
-  fb3eb6c  Add DNS Parallel Query support
-  acfaf1c  Fix DNS
-
+The core configuration is left untouched – upstream already sets
+enableParallelQuery automatically based on the number of DNS servers.
 Idempotent.
 """
 
@@ -18,7 +15,7 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 
-BASE = Path("V2rayNG")   # Android project folder inside the 2dust repo
+BASE = Path("V2rayNG")
 
 
 def backup_kotlin(p: Path):
@@ -64,136 +61,7 @@ def patch_appconfig():
 
 
 # ----------------------------------------------------------------------
-# 2. V2rayConfig.kt – add serveStale to DnsBean
-# ----------------------------------------------------------------------
-def patch_v2rayconfig():
-    p = BASE / "app/src/main/java/com/v2ray/ang/dto/V2rayConfig.kt"
-    if not p.exists():
-        print("✗ V2rayConfig.kt not found")
-        return
-    c = read(p)
-
-    if "var serveStale" in c or "val serveStale" in c:
-        print("• V2rayConfig: serveStale already present")
-        return
-
-    # Exact literal first
-    old_dns = '''data class DnsBean(
-        var servers: ArrayList<Any>? = null,
-        var hosts: Map<String, Any>? = null,
-        val clientIp: String? = null,
-        val disableCache: Boolean? = null,
-        val queryStrategy: String? = null,
-        val enableParallelQuery: Boolean? = null,
-        val tag: String? = null
-    )'''
-    new_dns = '''data class DnsBean(
-        var servers: ArrayList<Any>? = null,
-        var hosts: Map<String, Any>? = null,
-        val clientIp: String? = null,
-        val disableCache: Boolean? = null,
-        val queryStrategy: String? = null,
-        val enableParallelQuery: Boolean? = null,
-        val tag: String? = null,
-        var serveStale: Boolean? = null
-    )'''
-    if old_dns in c:
-        c = c.replace(old_dns, new_dns, 1)
-        write(p, c)
-        print("✓ V2rayConfig: added serveStale to DnsBean")
-        return
-
-    # Tolerant regex fallback
-    m = re.search(
-        r'(data class DnsBean\s*\(.*?val tag: String\? = null)\s*\)',
-        c, re.DOTALL
-    )
-    if m:
-        replacement = m.group(1) + ',\n        var serveStale: Boolean? = null\n    )'
-        c = c[:m.start()] + replacement + c[m.end():]
-        write(p, c)
-        print("✓ V2rayConfig: added serveStale (regex)")
-    else:
-        print("⚠ V2rayConfig: DnsBean not matched")
-
-
-# ----------------------------------------------------------------------
-# 3. CoreConfigManager.kt – append pref checks at end of configureDns
-#    Upstream does NOT construct DnsBean here; it only mutates the
-#    already-parsed v2rayConfig.dns via safe-call. So we do the same.
-# ----------------------------------------------------------------------
-def patch_coreconfigmanager_dns():
-    p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
-    if not p.exists():
-        print("✗ CoreConfigManager.kt not found")
-        return
-    c = read(p)
-
-    if "PREF_DNS_PARALLEL_QUERY" in c and "PREF_DNS_SERVE_STALE" in c:
-        print("• CoreConfigManager: DNS prefs already wired")
-        return
-
-    # Locate the method definition
-    sig = "private fun configureDns(\n        v2rayConfig: V2rayConfig,"
-    pos = c.find(sig)
-    if pos == -1:
-        # Looser fallback: allow any whitespace between params
-        m_sig = re.search(
-            r'private fun configureDns\(\s*v2rayConfig\s*:\s*V2rayConfig\s*,',
-            c
-        )
-        if not m_sig:
-            print("⚠ CoreConfigManager: configureDns(v2rayConfig, …) not found")
-            return
-        pos = m_sig.start()
-        sig = c[pos:m_sig.end()]
-
-    open_brace = c.find('{', pos)
-    if open_brace == -1:
-        print("⚠ CoreConfigManager: no opening brace for configureDns")
-        return
-
-    # Match braces to find the method end
-    brace_count = 1
-    i = open_brace + 1
-    while i < len(c) and brace_count > 0:
-        if c[i] == '{':
-            brace_count += 1
-        elif c[i] == '}':
-            brace_count -= 1
-        i += 1
-    if brace_count != 0:
-        print("⚠ CoreConfigManager: brace mismatch in configureDns")
-        return
-
-    insert_at = i - 1  # position of the closing brace
-
-    # Derive indentation from the first body line
-    body_start = open_brace + 1
-    line_start = c.rfind('\n', 0, body_start) + 1
-    indent = c[line_start:body_start]
-    if not indent.strip():
-        indent = "        "  # 8 spaces – matches Kotlin convention in this file
-
-    backup_kotlin(p)
-
-    injected = f'''
-{indent}// DNS toggles (patched)
-{indent}if (MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_SERVE_STALE, false) == true) {{
-{indent}    v2rayConfig.dns?.serveStale = true
-{indent}}}
-{indent}if (MmkvManager.decodeSettingsBool(AppConfig.PREF_DNS_PARALLEL_QUERY, false) == true) {{
-{indent}    v2rayConfig.dns?.enableParallelQuery = true
-{indent}}}
-'''
-
-    c = c[:insert_at] + injected + c[insert_at:]
-    write(p, c)
-    print("✓ CoreConfigManager: wired PREF_DNS_PARALLEL_QUERY + PREF_DNS_SERVE_STALE")
-
-
-# ----------------------------------------------------------------------
-# 4. SettingsActivity.kt – add DNS state + switches
+# 2. SettingsActivity.kt – add DNS state + switches
 # ----------------------------------------------------------------------
 def patch_settings():
     p = BASE / "app/src/main/java/com/v2ray/ang/ui/settings/SettingsActivity.kt"
@@ -202,7 +70,7 @@ def patch_settings():
         return
     c = read(p)
 
-    # 4a. State declarations
+    # 2a. State declarations
     old_decl = 'var dnsHosts by rememberMmkvString(AppConfig.PREF_DNS_HOSTS, "")'
     new_decl = old_decl + """
     var dnsParallelQuery by rememberMmkvBool(AppConfig.PREF_DNS_PARALLEL_QUERY, false)
@@ -215,7 +83,7 @@ def patch_settings():
     else:
         print("⚠ SettingsActivity: dnsHosts declaration not found")
 
-    # 4b. UI switches – insert after the dnsHosts SettingsEditItem block
+    # 2b. UI switches – insert after the dnsHosts SettingsEditItem block
     if "title_pref_dns_parallel_query" in c:
         print("• SettingsActivity: switches already present")
     else:
@@ -250,7 +118,7 @@ def patch_settings():
 
 
 # ----------------------------------------------------------------------
-# 5. strings.xml – DNS strings
+# 3. strings.xml – DNS strings
 # ----------------------------------------------------------------------
 def patch_strings():
     p = BASE / "app/src/main/res/values/strings.xml"
@@ -287,9 +155,7 @@ def patch_strings():
 
 
 # ----------------------------------------------------------------------
-# 6. FormFields.kt – typed filter + 50-item hard cap
-#    Keeps the plain Column that ExposedDropdownMenu needs (LazyColumn
-#    crashes on intrinsic measurement).
+# 4. FormFields.kt – typed filter + 50-item hard cap
 # ----------------------------------------------------------------------
 def patch_formfields():
     p = BASE / "app/src/main/java/com/v2ray/ang/ui/compose/FormFields.kt"
@@ -392,7 +258,7 @@ def patch_formfields():
         c = c.replace(old_menu, new_menu, 1)
         print("✓ FormFields: dropdown now uses filtered/capped list")
     else:
-        # Loose fallback: swap options -> visibleOptions and add heightIn
+        # Loose fallback
         c2 = re.sub(
             r'options\.forEach\s*\{\s*option\s*->',
             'visibleOptions.forEach { option ->',
@@ -417,12 +283,11 @@ def patch_formfields():
 # ----------------------------------------------------------------------
 def main():
     print("=" * 70)
-    print("Patcher for 2dust/v2rayNG – DNS Parallel/Serve-Stale + FormFields")
+    print("Patcher: DNS UI toggles + FormFields dropdown optimisation")
+    print("(CoreConfigManager / V2rayConfig left untouched)")
     print("=" * 70)
     try:
         patch_appconfig()
-        patch_v2rayconfig()
-        patch_coreconfigmanager_dns()
         patch_settings()
         patch_strings()
         patch_formfields()
