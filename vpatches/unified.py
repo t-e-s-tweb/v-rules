@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 v2rayNG patcher for 2dust/v2rayNG master
+
   • Allow CUSTOM profiles in policy groups / proxy chains / routing
   • Deduplicate identical chain-hop outbounds
 
-Self-healing: tolerates files already touched by earlier runs, including
-the broken `isGroupType()` variant. Uses inline `!= EConfigType.X` checks
-so no extension-function import is required.
+Works on a clean checkout. Self-healing for files already touched by
+earlier runs. Uses inline `!= EConfigType.POLICYGROUP && != EConfigType.PROXYCHAIN`
+checks so no extension-function imports are required.
 
 Idempotent.
 """
@@ -135,14 +136,6 @@ def patch_mmkvmanager():
 
 # ----------------------------------------------------------------------
 # 3. CoreConfigContextBuilder.kt – allow CUSTOM in every sub-outbound slot
-#
-#    Self-healing:
-#      • Removes the CUSTOM guard in resolveOutbound if still present.
-#      • Replaces EITHER `.filter { !it.configType.isComplexType() }` OR
-#        `.filter { !it.configType.isGroupType() }` with an inline check,
-#        so both the pristine file and a file already half-patched by an
-#        earlier run end up in the same correct state.
-#      • Relaxes the CUSTOM takeUnless on fallback outbounds.
 # ----------------------------------------------------------------------
 def patch_coreconfigcontextbuilder():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigContextBuilder.kt"
@@ -164,9 +157,7 @@ def patch_coreconfigcontextbuilder():
             print("✓ CoreConfigContextBuilder: removed CUSTOM guard in resolveOutbound")
             break
 
-    # 3b. Replace the policy-group and proxy-chain member filters.
-    #     Matches either the pristine `isComplexType()` or the broken
-    #     `isGroupType()` variant, and leaves a single-line inline check.
+    # 3b. Replace the member filters, matching isComplexType() OR isGroupType()
     filt_pat = re.compile(
         r'^(?P<indent>[ \t]*)\.filter\s*\{\s*!\s*it\.configType\.'
         r'(?:isComplexType|isGroupType)\(\)\s*\}',
@@ -185,7 +176,6 @@ def patch_coreconfigcontextbuilder():
         changed = True
         print(f"✓ CoreConfigContextBuilder: replaced {n} complex-type filter(s) with inline checks")
     else:
-        # Detect the already-inline form so we can report accurately.
         if re.search(
             r'\.filter\s*\{\s*it\.configType\s*!=\s*EConfigType\.POLICYGROUP',
             c,
@@ -210,7 +200,6 @@ def patch_coreconfigcontextbuilder():
     else:
         print("• CoreConfigContextBuilder: fallback filter unchanged or already applied")
 
-    # 3d. Sanity check: no `isGroupType(` left in the file
     if re.search(r'\bisGroupType\s*\(', c):
         print("⚠ CoreConfigContextBuilder: an isGroupType( call remains somewhere — inspect manually")
 
@@ -230,7 +219,22 @@ def patch_coreoutboundbuilder():
     c = read(p)
     changed = False
 
-    # 4a. Dispatch
+    # 4a. Add the outer V2rayConfig import if missing. The file historically
+    #     only imports the nested OutboundBean class.
+    if "import com.v2ray.ang.dto.V2rayConfig\n" not in c:
+        anchor = "import com.v2ray.ang.dto.V2rayConfig.OutboundBean"
+        if anchor in c:
+            c = c.replace(
+                anchor,
+                "import com.v2ray.ang.dto.V2rayConfig\n" + anchor,
+                1,
+            )
+            changed = True
+            print("✓ CoreOutboundBuilder: added `import com.v2ray.ang.dto.V2rayConfig`")
+        else:
+            print("⚠ CoreOutboundBuilder: OutboundBean import anchor not found")
+
+    # 4b. Dispatch
     if "EConfigType.CUSTOM -> toOutboundCustom" not in c:
         old_dispatch = '''            EConfigType.HTTP -> toOutboundHttp(profileItem)
             else -> null'''
@@ -246,7 +250,7 @@ def patch_coreoutboundbuilder():
     else:
         print("• CoreOutboundBuilder: dispatch case already present")
 
-    # 4b. Skip global mux override for CUSTOM
+    # 4c. Skip global mux override for CUSTOM
     old_ret = '''        outbound ?: return null
         val ret = updateOutboundWithGlobalSettings(outbound)
         if (!ret) return null
@@ -266,7 +270,7 @@ def patch_coreoutboundbuilder():
     else:
         print("• CoreOutboundBuilder: global-mux skip already present or not matched")
 
-    # 4c. The conversion function itself
+    # 4d. The conversion function
     if "private fun toOutboundCustom" not in c:
         last_brace = c.rfind('}')
         if last_brace == -1:
@@ -308,7 +312,7 @@ def patch_coreoutboundbuilder():
 
 
 # ----------------------------------------------------------------------
-# 5. CoreConfigManager.kt – thread dedup map into chain handler
+# 5. CoreConfigManager.kt – dedup identical chain hops
 # ----------------------------------------------------------------------
 def patch_coreconfigmanager():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
@@ -400,7 +404,7 @@ def patch_coreconfigmanager():
     else:
         print("• CoreConfigManager: PROXYCHAIN call already updated or not matched")
 
-    # 5d. Rewrite handleProxyChainResolvedOutbound with dedup + signature helper
+    # 5d. Rewrite handleProxyChainResolvedOutbound + add signature helper
     old_handler_pat = re.compile(
         r'    private fun handleProxyChainResolvedOutbound\(\s*'
         r'resolvedOutbound: CoreConfigContext\.ResolvedOutbound,\s*'
@@ -564,7 +568,6 @@ def patch_serverproxychain_activity():
         changed = True
         print("✓ ServerProxyChainActivity: CUSTOM added to picker")
 
-    # Replace either isComplexType() or isGroupType() in the validation block
     old_valid_re = re.compile(
         r'profile\s*==\s*null\s*\|\|\s*profile\.configType\.(?:isComplexType|isGroupType)\(\)'
     )
