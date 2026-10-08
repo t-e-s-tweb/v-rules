@@ -41,7 +41,7 @@ def patch_econfigtype():
         return
     c = read(p)
 
-    if "MASQUE" in c:
+    if re.search(r'\bMASQUE\b', c):
         print("• EConfigType: MASQUE already present")
         return
 
@@ -66,7 +66,7 @@ def patch_appconfig():
         return
     c = read(p)
 
-    if "MASQUE" in c:
+    if re.search(r'\bconst val MASQUE\b', c):
         print("• AppConfig: MASQUE scheme already present")
         return
 
@@ -111,7 +111,7 @@ def patch_profileitem():
 
 
 # ----------------------------------------------------------------------
-# 4. V2rayConfig.kt – add masque settings to OutSettingsBean
+# 4. V2rayConfig.kt – add `masque` field + MasqueConfig class
 # ----------------------------------------------------------------------
 def patch_v2rayconfig():
     p = BASE / "app/src/main/java/com/v2ray/ang/dto/V2rayConfig.kt"
@@ -119,22 +119,32 @@ def patch_v2rayconfig():
         print("✗ V2rayConfig.kt not found")
         return
     c = read(p)
+    changed = False
 
     if "MasqueConfig" in c:
         print("• V2rayConfig: MasqueConfig already present")
         return
 
-    # Add MasqueConfig data class after WireGuardBean
-    old = '''            data class WireGuardBean(
+    # 4a. Add `masque` field to OutSettingsBean
+    old_field = '            var remoteDNS: List<String>? = null,\n        ) {'
+    new_field = '''            var remoteDNS: List<String>? = null,
+            /*Masque*/
+            var masque: MasqueConfig? = null,
+        ) {'''
+    if old_field in c:
+        c = c.replace(old_field, new_field, 1)
+        changed = True
+        print("✓ V2rayConfig: added masque field to OutSettingsBean")
+    else:
+        print("⚠ V2rayConfig: remoteDNS field boundary not found")
+
+    # 4b. Add MasqueConfig data class after WireGuardBean
+    old_bean = '''            data class WireGuardBean(
                 var publicKey: String = "",
                 var preSharedKey: String? = null,
                 var endpoint: String = ""
             )'''
-    new = '''            data class WireGuardBean(
-                var publicKey: String = "",
-                var preSharedKey: String? = null,
-                var endpoint: String = ""
-            )
+    new_bean = old_bean + '''
 
             data class MasqueConfig(
                 var server: String = "",
@@ -150,16 +160,24 @@ def patch_v2rayconfig():
                 var path: String? = null,
                 var url: String? = null,
             )'''
-    if old in c:
-        c = c.replace(old, new, 1)
-        write(p, c)
+    if old_bean in c:
+        c = c.replace(old_bean, new_bean, 1)
+        changed = True
         print("✓ V2rayConfig: added MasqueConfig data class")
     else:
-        print("⚠ V2rayConfig: WireGuardBean data class not found")
+        print("⚠ V2rayConfig: WireGuardBean not found")
+
+    if changed:
+        backup_kotlin(p)
+        write(p, c)
 
 
 # ----------------------------------------------------------------------
-# 5. CoreOutboundBuilder.kt – add toOutboundMasque function
+# 5. CoreOutboundBuilder.kt
+#    5a. dispatch case
+#    5b. createInitOutbound MASQUE branch
+#    5c. mux-disable list
+#    5d. toOutboundMasque function
 # ----------------------------------------------------------------------
 def patch_coreoutboundbuilder():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreOutboundBuilder.kt"
@@ -167,32 +185,86 @@ def patch_coreoutboundbuilder():
         print("✗ CoreOutboundBuilder.kt not found")
         return
     c = read(p)
+    changed = False
 
-    if "toOutboundMasque" in c:
-        print("• CoreOutboundBuilder: toOutboundMasque already present")
-        return
-
-    # Add case to dispatch
-    old_dispatch = '''            EConfigType.HYSTERIA2 -> toOutboundHysteria2(profileItem)
+    # 5a. Dispatch
+    if "EConfigType.MASQUE -> toOutboundMasque" not in c:
+        old_dispatch = '''            EConfigType.HYSTERIA2 -> toOutboundHysteria2(profileItem)
             EConfigType.HTTP -> toOutboundHttp(profileItem)
             else -> null'''
-    new_dispatch = '''            EConfigType.HYSTERIA2 -> toOutboundHysteria2(profileItem)
+        new_dispatch = '''            EConfigType.HYSTERIA2 -> toOutboundHysteria2(profileItem)
             EConfigType.HTTP -> toOutboundHttp(profileItem)
             EConfigType.MASQUE -> toOutboundMasque(profileItem)
             else -> null'''
-    if old_dispatch in c:
-        c = c.replace(old_dispatch, new_dispatch, 1)
+        if old_dispatch in c:
+            c = c.replace(old_dispatch, new_dispatch, 1)
+            changed = True
+            print("✓ CoreOutboundBuilder: added MASQUE dispatch case")
+        else:
+            print("⚠ CoreOutboundBuilder: dispatch switch not found")
     else:
-        print("⚠ CoreOutboundBuilder: dispatch switch not found")
+        print("• CoreOutboundBuilder: dispatch case already present")
 
-    # Add toOutboundMasque function before the last closing brace of the object
-    # Find the last occurrence of the object's closing brace
-    last_brace = c.rfind('}')
-    if last_brace == -1:
-        print("⚠ CoreOutboundBuilder: could not find closing brace")
-        return
+    # 5b. createInitOutbound MASQUE branch
+    if "EConfigType.MASQUE -> OutboundBean(" not in c:
+        old_init = '''        EConfigType.HYSTERIA,
+        EConfigType.HYSTERIA2 -> OutboundBean(
+            protocol = EConfigType.HYSTERIA.name.lowercase(),
+            settings = OutSettingsBean(),
+            streamSettings = OutboundBean.StreamSettingsBean()
+        )
 
-    masque_func = '''
+        else -> null'''
+        new_init = '''        EConfigType.HYSTERIA,
+        EConfigType.HYSTERIA2 -> OutboundBean(
+            protocol = EConfigType.HYSTERIA.name.lowercase(),
+            settings = OutSettingsBean(),
+            streamSettings = OutboundBean.StreamSettingsBean()
+        )
+
+        EConfigType.MASQUE -> OutboundBean(
+            protocol = EConfigType.MASQUE.name.lowercase(),
+            settings = OutSettingsBean(
+                secretKey = "",
+                masque = OutSettingsBean.MasqueConfig()
+            )
+        )
+
+        else -> null'''
+        if old_init in c:
+            c = c.replace(old_init, new_init, 1)
+            changed = True
+            print("✓ CoreOutboundBuilder: added MASQUE to createInitOutbound")
+        else:
+            print("⚠ CoreOutboundBuilder: createInitOutbound tail not found")
+    else:
+        print("• CoreOutboundBuilder: createInitOutbound already has MASQUE")
+
+    # 5c. Mux-disable list
+    if "EConfigType.MASQUE.name" not in c:
+        old_mux = '''                || protocol.equals(EConfigType.HYSTERIA2.name, true)
+                || protocol.equals(EConfigType.HYSTERIA.name, true)
+            ) {'''
+        new_mux = '''                || protocol.equals(EConfigType.HYSTERIA2.name, true)
+                || protocol.equals(EConfigType.HYSTERIA.name, true)
+                || protocol.equals(EConfigType.MASQUE.name, true)
+            ) {'''
+        if old_mux in c:
+            c = c.replace(old_mux, new_mux, 1)
+            changed = True
+            print("✓ CoreOutboundBuilder: added MASQUE to mux-disable list")
+        else:
+            print("⚠ CoreOutboundBuilder: mux-disable list not matched")
+    else:
+        print("• CoreOutboundBuilder: mux-disable already includes MASQUE")
+
+    # 5d. Add toOutboundMasque function
+    if "private fun toOutboundMasque" not in c:
+        last_brace = c.rfind('}')
+        if last_brace == -1:
+            print("⚠ CoreOutboundBuilder: closing brace not found")
+        else:
+            masque_func = '''
     private fun toOutboundMasque(profileItem: ProfileItem): OutboundBean? {
         val outboundBean = createInitOutbound(EConfigType.MASQUE) ?: return null
 
@@ -224,51 +296,47 @@ def patch_coreoutboundbuilder():
             ipv4Dns.ifEmpty { listOf(AppConfig.WIREGUARD_LOCAL_REMOTE_DNS) }
         }
 
+        val serverAddr = getServerAddress(profileItem)
+        val serverPort = profileItem.serverPort.orEmpty().toIntOrNull() ?: 443
+
         outboundBean.settings?.let { settings ->
-            settings.address = getServerAddress(profileItem)
-            settings.port = profileItem.serverPort.orEmpty().toInt()
+            settings.address = serverAddr
+            settings.port = serverPort
             settings.secretKey = profileItem.secretKey
-            settings.publicKey = profileItem.publicKey
-            settings.address = addresses
-            settings.port = null
             settings.mtu = profileItem.mtu
             settings.remoteDNS = remotes
+            settings.masque = OutboundBean.OutSettingsBean.MasqueConfig(
+                server = serverAddr,
+                port = serverPort,
+                privateKey = profileItem.secretKey.orEmpty(),
+                publicKey = profileItem.publicKey.orEmpty(),
+                ip = addresses.firstOrNull() ?: AppConfig.WIREGUARD_LOCAL_ADDRESS_V4,
+                ipv6 = addresses.firstOrNull { it.contains(":") },
+                mtu = profileItem.mtu,
+                udp = true,
+                remoteDNS = remotes,
+                host = profileItem.masqueHost,
+                path = profileItem.masquePath,
+                url = profileItem.masqueUrl,
+            )
         }
 
-        // MASQUE-specific settings
-        outboundBean.settings?.masque = V2rayConfig.OutboundBean.OutSettingsBean.MasqueConfig(
-            server = profileItem.server.orEmpty(),
-            port = profileItem.serverPort.orEmpty().toIntOrNull() ?: 443,
-            privateKey = profileItem.secretKey.orEmpty(),
-            publicKey = profileItem.publicKey.orEmpty(),
-            ip = addresses.firstOrNull() ?: AppConfig.WIREGUARD_LOCAL_ADDRESS_V4,
-            ipv6 = addresses.firstOrNull { it.contains(":") },
-            mtu = profileItem.mtu,
-            udp = true,
-            remoteDNS = remotes,
-            host = profileItem.masqueHost,
-            path = profileItem.masquePath,
-            url = profileItem.masqueUrl,
-        )
-
-        if (!profileItem.finalMask.isNullOrBlank()) {
-            outboundBean.streamSettings = OutboundBean.StreamSettingsBean()
-            outboundBean.streamSettings?.let {
-                updateOutboundFinalMask(it, profileItem)
-                it.network = null
-            }
-        }
         return outboundBean
     }
 '''
+            c = c[:last_brace] + masque_func + c[last_brace:]
+            changed = True
+            print("✓ CoreOutboundBuilder: added toOutboundMasque function")
+    else:
+        print("• CoreOutboundBuilder: toOutboundMasque already present")
 
-    c = c[:last_brace] + masque_func + c[last_brace:]
-    write(p, c)
-    print("✓ CoreOutboundBuilder: added toOutboundMasque function")
+    if changed:
+        backup_kotlin(p)
+        write(p, c)
 
 
 # ----------------------------------------------------------------------
-# 6. MasqueFmt.kt – new formatter for MASQUE URIs
+# 6. MasqueFmt.kt – new formatter
 # ----------------------------------------------------------------------
 def create_masque_formatter():
     p = BASE / "app/src/main/java/com/v2ray/ang/fmt/MasqueFmt.kt"
@@ -288,9 +356,6 @@ import com.v2ray.ang.util.Utils
 import java.net.URI
 
 object MasqueFmt : FmtBase() {
-    /**
-     * Parses a MASQUE URI string into a ProfileItem object.
-     */
     fun parse(str: String): ProfileItem? {
         val config = ProfileItem.create(EConfigType.MASQUE)
 
@@ -317,9 +382,6 @@ object MasqueFmt : FmtBase() {
         return config
     }
 
-    /**
-     * Converts a ProfileItem object to a URI string.
-     */
     fun toUri(config: ProfileItem): String {
         val dicQuery = HashMap<String, String>()
 
@@ -351,7 +413,7 @@ object MasqueFmt : FmtBase() {
 
 
 # ----------------------------------------------------------------------
-# 7. AngConfigManager.kt – register MASQUE formatter
+# 7. AngConfigManager.kt – register MASQUE formatter + share case
 # ----------------------------------------------------------------------
 def patch_angconfigmanager():
     p = BASE / "app/src/main/java/com/v2ray/ang/handler/AngConfigManager.kt"
@@ -359,30 +421,55 @@ def patch_angconfigmanager():
         print("✗ AngConfigManager.kt not found")
         return
     c = read(p)
+    changed = False
 
-    if "MasqueFmt" in c:
-        print("• AngConfigManager: MasqueFmt already registered")
-        return
+    if "import com.v2ray.ang.fmt.MasqueFmt" not in c:
+        c = c.replace(
+            "import com.v2ray.ang.fmt.Hysteria2Fmt",
+            "import com.v2ray.ang.fmt.Hysteria2Fmt\nimport com.v2ray.ang.fmt.MasqueFmt",
+            1,
+        )
+        changed = True
+        print("✓ AngConfigManager: added MasqueFmt import")
 
-    # Add import
-    c = c.replace("import com.v2ray.ang.fmt.Hysteria2Fmt", "import com.v2ray.ang.fmt.Hysteria2Fmt\nimport com.v2ray.ang.fmt.MasqueFmt", 1)
-
-    # Add to parser map
     old_map = '''            EConfigType.HYSTERIA2.protocolScheme to Hysteria2Fmt::parse,
             AppConfig.HY2 to Hysteria2Fmt::parse,'''
     new_map = '''            EConfigType.HYSTERIA2.protocolScheme to Hysteria2Fmt::parse,
             EConfigType.MASQUE.protocolScheme to MasqueFmt::parse,
             AppConfig.HY2 to Hysteria2Fmt::parse,'''
-    if old_map in c:
-        c = c.replace(old_map, new_map, 1)
-        write(p, c)
-        print("✓ AngConfigManager: registered MasqueFmt")
+    if "EConfigType.MASQUE.protocolScheme to MasqueFmt::parse" not in c:
+        if old_map in c:
+            c = c.replace(old_map, new_map, 1)
+            changed = True
+            print("✓ AngConfigManager: registered MasqueFmt in parser map")
+        else:
+            print("⚠ AngConfigManager: parser map insertion point not found")
     else:
-        print("⚠ AngConfigManager: parser map insertion point not found")
+        print("• AngConfigManager: MasqueFmt already in parser map")
+
+    # shareConfig: add MASQUE case
+    old_share = '''                EConfigType.HYSTERIA2 -> Hysteria2Fmt.toUri(config)
+                else -> {}'''
+    new_share = '''                EConfigType.HYSTERIA2 -> Hysteria2Fmt.toUri(config)
+                EConfigType.MASQUE -> MasqueFmt.toUri(config)
+                else -> {}'''
+    if "EConfigType.MASQUE -> MasqueFmt.toUri" not in c:
+        if old_share in c:
+            c = c.replace(old_share, new_share, 1)
+            changed = True
+            print("✓ AngConfigManager: added MASQUE to shareConfig")
+        else:
+            print("⚠ AngConfigManager: shareConfig HYSTERIA2 not found")
+    else:
+        print("• AngConfigManager: MASQUE share case already present")
+
+    if changed:
+        backup_kotlin(p)
+        write(p, c)
 
 
 # ----------------------------------------------------------------------
-# 8. strings.xml – add MASQUE UI strings
+# 8. strings.xml – MASQUE UI strings
 # ----------------------------------------------------------------------
 def patch_strings():
     p = BASE / "app/src/main/res/values/strings.xml"
@@ -419,7 +506,7 @@ def patch_strings():
 
 
 # ----------------------------------------------------------------------
-# 9. ServerMasqueActivity.kt – new UI activity
+# 9. ServerMasqueActivity.kt
 # ----------------------------------------------------------------------
 def create_server_activity():
     p = BASE / "app/src/main/java/com/v2ray/ang/ui/server/ServerMasqueActivity.kt"
@@ -435,7 +522,6 @@ import androidx.compose.ui.res.stringResource
 import com.v2ray.ang.R
 import com.v2ray.ang.enums.EConfigType
 import com.v2ray.ang.ui.compose.FormTextField
-import com.v2ray.ang.ui.compose.SettingsSwitchItem
 
 class ServerMasqueActivity : BaseServerActivity() {
 
@@ -492,8 +578,6 @@ class ServerMasqueActivity : BaseServerActivity() {
             state.remoteDNS,
             { state.remoteDNS = it }
         )
-
-        // MASQUE-specific fields
         FormTextField(
             stringResource(R.string.server_lab_masque_host),
             state.masqueHost,
@@ -522,7 +606,7 @@ class ServerMasqueActivity : BaseServerActivity() {
 
 
 # ----------------------------------------------------------------------
-# 10. ServerUiState.kt – add MASQUE fields to UI state
+# 10. ServerUiState.kt – add MASQUE fields (FIXED)
 # ----------------------------------------------------------------------
 def patch_serveruistate():
     p = BASE / "app/src/main/java/com/v2ray/ang/ui/server/ServerUiState.kt"
@@ -535,60 +619,81 @@ def patch_serveruistate():
         print("• ServerUiState: MASQUE fields already present")
         return
 
-    # Add fields to the constructor
-    old_constructor = '    var browserDialerMode: String = "",'
-    new_constructor = '''    var browserDialerMode: String = "",
-    var masqueHost: String = "",
-    var masquePath: String = "",
-    var masqueUrl: String = "",'''
-    if old_constructor in c:
-        c = c.replace(old_constructor, new_constructor, 1)
-    else:
-        print("⚠ ServerUiState: browserDialerMode constructor field not found")
+    changed = False
 
-    # Add mutable state properties
-    old_props = '    var browserDialerMode by mutableStateOf(browserDialerMode)'
-    new_props = '''    var browserDialerMode by mutableStateOf(browserDialerMode)
+    # (a) primary constructor param — NO `var`, matches the actual file
+    old_ctor = '    browserDialerMode: String = "",'
+    new_ctor = '''    browserDialerMode: String = "",
+    masqueHost: String = "",
+    masquePath: String = "",
+    masqueUrl: String = "",'''
+    if old_ctor in c:
+        c = c.replace(old_ctor, new_ctor, 1)
+        changed = True
+        print("✓ ServerUiState: added MASQUE constructor params")
+    else:
+        print("⚠ ServerUiState: browserDialerMode constructor param not found")
+
+    # (b) class body property delegate
+    old_prop = '    var browserDialerMode by mutableStateOf(browserDialerMode)'
+    new_prop = '''    var browserDialerMode by mutableStateOf(browserDialerMode)
     var masqueHost by mutableStateOf(masqueHost)
     var masquePath by mutableStateOf(masquePath)
     var masqueUrl by mutableStateOf(masqueUrl)'''
-    if old_props in c:
-        c = c.replace(old_props, new_props, 1)
+    if old_prop in c:
+        c = c.replace(old_prop, new_prop, 1)
+        changed = True
+        print("✓ ServerUiState: added MASQUE property delegates")
     else:
         print("⚠ ServerUiState: browserDialerMode property not found")
 
-    # Add to fromProfileItem
-    old_from = '                browserDialerMode = initialConfig.browserDialerMode ?: "",'
-    new_from = '''                browserDialerMode = initialConfig.browserDialerMode ?: "",
-                masqueHost = initialConfig.masqueHost ?: "",
-                masquePath = initialConfig.masquePath ?: "",
-                masqueUrl = initialConfig.masqueUrl ?: "",'''
-    if old_from in c:
-        c = c.replace(old_from, new_from, 1)
+    # (c) fromProfileItem: append masque fields after the browserDialerMode line
+    m = re.search(
+        r'^(\s*)browserDialerMode\s*=\s*initialConfig\.browserDialerMode.*$',
+        c, re.MULTILINE,
+    )
+    if m and "masqueHost = initialConfig.masqueHost" not in c:
+        indent = m.group(1)
+        addition = (
+            f"\n{indent}masqueHost = initialConfig.masqueHost ?: \"\","
+            f"\n{indent}masquePath = initialConfig.masquePath ?: \"\","
+            f"\n{indent}masqueUrl = initialConfig.masqueUrl ?: \"\","
+        )
+        c = c[:m.end()] + addition + c[m.end():]
+        changed = True
+        print("✓ ServerUiState: added MASQUE fields to fromProfileItem")
+    elif m:
+        print("• ServerUiState: fromProfileItem already has MASQUE")
     else:
-        print("⚠ ServerUiState: fromProfileItem browserDialerMode not found")
+        print("⚠ ServerUiState: fromProfileItem mapping not found")
 
-    # Add to toProfileItem
-    old_to = '            browserDialerMode = if (network in listOf(NetworkType.WS.type, NetworkType.XHTTP.type)) {\n                browserDialerMode.nullIfBlank()\n            } else {\n                null\n            },'
-    new_to = '''            browserDialerMode = if (network in listOf(NetworkType.WS.type, NetworkType.XHTTP.type)) {
+    # (d) toProfileItem: append masque fields after the browserDialerMode block
+    old_to = '''            browserDialerMode = if (network in listOf(NetworkType.WS.type, NetworkType.XHTTP.type)) {
                 browserDialerMode.nullIfBlank()
             } else {
                 null
-            },
+            },'''
+    new_to = old_to + '''
             masqueHost = masqueHost.nullIfBlank(),
             masquePath = masquePath.nullIfBlank(),
             masqueUrl = masqueUrl.nullIfBlank(),'''
-    if old_to in c:
-        c = c.replace(old_to, new_to, 1)
+    if "masqueHost = masqueHost.nullIfBlank()" not in c:
+        if old_to in c:
+            c = c.replace(old_to, new_to, 1)
+            changed = True
+            print("✓ ServerUiState: added MASQUE fields to toProfileItem")
+        else:
+            print("⚠ ServerUiState: toProfileItem browserDialerMode block not found")
     else:
-        print("⚠ ServerUiState: toProfileItem browserDialerMode block not found")
+        print("• ServerUiState: toProfileItem already has MASQUE")
 
-    write(p, c)
-    print("✓ ServerUiState: added MASQUE fields")
+    if changed:
+        backup_kotlin(p)
+        write(p, c)
 
 
 # ----------------------------------------------------------------------
-# 11. MainActivity.kt – add MASQUE to import menu
+# 11. MainActivity.kt – MASQUE import branch
 # ----------------------------------------------------------------------
 def patch_mainactivity():
     p = BASE / "app/src/main/java/com/v2ray/ang/ui/main/MainActivity.kt"
@@ -597,20 +702,46 @@ def patch_mainactivity():
         return
     c = read(p)
 
-    if "EConfigType.MASQUE" in c:
-        print("• MainActivity: MASQUE already in import menu")
+    if "ServerMasqueActivity" in c:
+        print("• MainActivity: MASQUE import branch already present")
         return
 
-    # Add to importManually function
     old = '            EConfigType.HYSTERIA2.value -> Intent(this, ServerHysteria2Activity::class.java)'
     new = '''            EConfigType.HYSTERIA2.value -> Intent(this, ServerHysteria2Activity::class.java)
             EConfigType.MASQUE.value -> Intent(this, ServerMasqueActivity::class.java)'''
     if old in c:
         c = c.replace(old, new, 1)
+        backup_kotlin(p)
         write(p, c)
-        print("✓ MainActivity: added MASQUE to import menu")
+        print("✓ MainActivity: added MASQUE import branch")
     else:
-        print("⚠ MainActivity: HYSTERIA2 import entry not found")
+        print("⚠ MainActivity: HYSTERIA2 import branch not found")
+
+
+# ----------------------------------------------------------------------
+# 12. MainImportMenu.kt – add MASQUE entry
+# ----------------------------------------------------------------------
+def patch_mainimportmenu():
+    p = BASE / "app/src/main/java/com/v2ray/ang/ui/main/MainImportMenu.kt"
+    if not p.exists():
+        print("✗ MainImportMenu.kt not found")
+        return
+    c = read(p)
+
+    if "EConfigType.MASQUE.value" in c:
+        print("• MainImportMenu: MASQUE entry already present")
+        return
+
+    old = '    Hysteria2(R.string.menu_item_import_config_manually_hysteria2, MainAction.ImportManually(EConfigType.HYSTERIA2.value))'
+    new = '''    Hysteria2(R.string.menu_item_import_config_manually_hysteria2, MainAction.ImportManually(EConfigType.HYSTERIA2.value)),
+    Masque(R.string.menu_item_import_config_manually_masque, MainAction.ImportManually(EConfigType.MASQUE.value))'''
+    if old in c:
+        c = c.replace(old, new, 1)
+        backup_kotlin(p)
+        write(p, c)
+        print("✓ MainImportMenu: added MASQUE entry")
+    else:
+        print("⚠ MainImportMenu: Hysteria2 enum entry not found")
 
 
 # ----------------------------------------------------------------------
@@ -632,6 +763,7 @@ def main():
         create_server_activity()
         patch_serveruistate()
         patch_mainactivity()
+        patch_mainimportmenu()
         print("\n✅ Done.")
         print("👉 Rebuild and test.")
     except Exception as e:
