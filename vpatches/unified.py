@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 v2rayNG patcher for 2dust/v2rayNG master
-  • Adds MASQUE (CONNECT-IP / WARP) outbound protocol support.
+  • Allow CUSTOM profiles in policy groups / proxy chains / routing
+  • Deduplicate identical chain-hop outbounds
 
 Idempotent.
 """
@@ -32,57 +33,7 @@ def write(p, s):
 
 
 # ----------------------------------------------------------------------
-# 1. EConfigType.kt – add MASQUE enum
-# ----------------------------------------------------------------------
-def patch_econfigtype():
-    p = BASE / "app/src/main/java/com/v2ray/ang/enums/EConfigType.kt"
-    if not p.exists():
-        print("✗ EConfigType.kt not found")
-        return
-    c = read(p)
-
-    if re.search(r'\bMASQUE\b', c):
-        print("• EConfigType: MASQUE already present")
-        return
-
-    old = '    HTTP(10, AppConfig.HTTP),'
-    new = '''    HTTP(10, AppConfig.HTTP),
-    MASQUE(11, AppConfig.MASQUE),'''
-    if old in c:
-        c = c.replace(old, new, 1)
-        write(p, c)
-        print("✓ EConfigType: added MASQUE")
-    else:
-        print("⚠ EConfigType: HTTP entry not found")
-
-
-# ----------------------------------------------------------------------
-# 2. AppConfig.kt – add MASQUE scheme constant
-# ----------------------------------------------------------------------
-def patch_appconfig():
-    p = BASE / "app/src/main/java/com/v2ray/ang/AppConfig.kt"
-    if not p.exists():
-        print("✗ AppConfig.kt not found")
-        return
-    c = read(p)
-
-    if re.search(r'\bconst val MASQUE\b', c):
-        print("• AppConfig: MASQUE scheme already present")
-        return
-
-    old = '    const val HY2 = "hy2://"'
-    new = '''    const val HY2 = "hy2://"
-    const val MASQUE = "masque://"'''
-    if old in c:
-        c = c.replace(old, new, 1)
-        write(p, c)
-        print("✓ AppConfig: added MASQUE scheme")
-    else:
-        print("⚠ AppConfig: HY2 entry not found")
-
-
-# ----------------------------------------------------------------------
-# 3. ProfileItem.kt – add MASQUE-specific fields
+# 1. ProfileItem.kt – transient field to carry the raw CUSTOM config
 # ----------------------------------------------------------------------
 def patch_profileitem():
     p = BASE / "app/src/main/java/com/v2ray/ang/dto/entities/ProfileItem.kt"
@@ -91,81 +42,164 @@ def patch_profileitem():
         return
     c = read(p)
 
-    if "masqueHost" in c:
-        print("• ProfileItem: MASQUE fields already present")
+    if "customConfigRaw" in c:
+        print("• ProfileItem: customConfigRaw already present")
         return
 
-    old = '    var browserDialerMode: String? = null,'
-    new = '''    var browserDialerMode: String? = null,
+    # Insert a body-declared transient property. Body properties are not
+    # included in data-class copy() or Gson serialization, so MMKV stays
+    # unchanged.
+    old = '''    companion object {
+        fun create(configType: EConfigType): ProfileItem =
+            ProfileItem(configType = configType)
+    }'''
+    new = '''    /**
+     * Raw JSON of a CUSTOM profile, populated in-memory by
+     * MmkvManager.decodeServerConfig. Never persisted; used only to
+     * extract the proxy outbound when a CUSTOM profile is used as a
+     * sub-outbound (chain, policy-group member, routing target).
+     */
+    @Transient
+    var customConfigRaw: String? = null
 
-    // MASQUE-specific fields
-    var masqueHost: String? = null,
-    var masquePath: String? = null,
-    var masqueUrl: String? = null,'''
+    companion object {
+        fun create(configType: EConfigType): ProfileItem =
+            ProfileItem(configType = configType)
+    }'''
     if old in c:
         c = c.replace(old, new, 1)
+        backup_kotlin(p)
         write(p, c)
-        print("✓ ProfileItem: added MASQUE fields")
+        print("✓ ProfileItem: added transient customConfigRaw")
     else:
-        print("⚠ ProfileItem: browserDialerMode field not found")
+        print("⚠ ProfileItem: companion object not found")
 
 
 # ----------------------------------------------------------------------
-# 4. V2rayConfig.kt – add `masque` field + MasqueConfig class
+# 2. MmkvManager.kt – populate customConfigRaw + guid on decode
 # ----------------------------------------------------------------------
-def patch_v2rayconfig():
-    p = BASE / "app/src/main/java/com/v2ray/ang/dto/V2rayConfig.kt"
+def patch_mmkvmanager():
+    p = BASE / "app/src/main/java/com/v2ray/ang/handler/MmkvManager.kt"
     if not p.exists():
-        print("✗ V2rayConfig.kt not found")
+        print("✗ MmkvManager.kt not found")
+        return
+    c = read(p)
+
+    if "customConfigRaw = serverRawStorage" in c:
+        print("• MmkvManager: customConfigRaw already populated")
+        return
+
+    # Add EConfigType import
+    if "import com.v2ray.ang.enums.EConfigType" not in c:
+        c = c.replace(
+            "import com.v2ray.ang.dto.entities.ProfileItem",
+            "import com.v2ray.ang.dto.entities.ProfileItem\nimport com.v2ray.ang.enums.EConfigType",
+            1,
+        )
+
+    old = '''    fun decodeServerConfig(guid: String): ProfileItem? {
+        if (guid.isBlank()) {
+            return null
+        }
+        val json = profileFullStorage.decodeString(guid)
+        if (json.isNullOrBlank()) {
+            return null
+        }
+        return JsonUtil.fromJsonSafe(json, ProfileItem::class.java)
+    }'''
+    new = '''    fun decodeServerConfig(guid: String): ProfileItem? {
+        if (guid.isBlank()) {
+            return null
+        }
+        val json = profileFullStorage.decodeString(guid)
+        if (json.isNullOrBlank()) {
+            return null
+        }
+        val item = JsonUtil.fromJsonSafe(json, ProfileItem::class.java) ?: return null
+        // CUSTOM profiles keep their full JSON in a separate store. Load it
+        // into the transient field so the profile can be used as a chain
+        // hop, a policy-group member, or a routing target.
+        if (item.configType == EConfigType.CUSTOM) {
+            item.customConfigRaw = serverRawStorage.decodeString(guid)
+        }
+        return item
+    }'''
+    if old in c:
+        c = c.replace(old, new, 1)
+        backup_kotlin(p)
+        write(p, c)
+        print("✓ MmkvManager: populate customConfigRaw on decode")
+    else:
+        print("⚠ MmkvManager: decodeServerConfig body not matched")
+
+
+# ----------------------------------------------------------------------
+# 3. CoreConfigContextBuilder.kt – allow CUSTOM in every sub-outbound slot
+# ----------------------------------------------------------------------
+def patch_coreconfigcontextbuilder():
+    p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigContextBuilder.kt"
+    if not p.exists():
+        print("✗ CoreConfigContextBuilder.kt not found")
         return
     c = read(p)
     changed = False
 
-    if "MasqueConfig" in c:
-        print("• V2rayConfig: MasqueConfig already present")
-        return
-
-    # 4a. Add `masque` field to OutSettingsBean
-    old_field = '            var remoteDNS: List<String>? = null,\n        ) {'
-    new_field = '''            var remoteDNS: List<String>? = null,
-            /*Masque*/
-            var masque: MasqueConfig? = null,
-        ) {'''
-    if old_field in c:
-        c = c.replace(old_field, new_field, 1)
+    # 3a. resolveOutbound: drop the CUSTOM short-circuit
+    old_guard = '''    private fun resolveOutbound(tag: String, profile: ProfileItem): CoreConfigContext.ResolvedOutbound? {
+        if (profile.configType == EConfigType.CUSTOM) {
+            return null
+        }
+'''
+    new_guard = '''    private fun resolveOutbound(tag: String, profile: ProfileItem): CoreConfigContext.ResolvedOutbound? {
+'''
+    if old_guard in c:
+        c = c.replace(old_guard, new_guard, 1)
         changed = True
-        print("✓ V2rayConfig: added masque field to OutSettingsBean")
+        print("✓ CoreConfigContextBuilder: removed CUSTOM guard in resolveOutbound")
+    elif "if (profile.configType == EConfigType.CUSTOM) {\n            return null\n        }" not in c:
+        print("• CoreConfigContextBuilder: resolveOutbound guard already absent")
     else:
-        print("⚠ V2rayConfig: remoteDNS field boundary not found")
+        print("⚠ CoreConfigContextBuilder: resolveOutbound guard not matched")
 
-    # 4b. Add MasqueConfig data class after WireGuardBean
-    old_bean = '''            data class WireGuardBean(
-                var publicKey: String = "",
-                var preSharedKey: String? = null,
-                var endpoint: String = ""
-            )'''
-    new_bean = old_bean + '''
-
-            data class MasqueConfig(
-                var server: String = "",
-                var port: Int = 443,
-                var privateKey: String = "",
-                var publicKey: String = "",
-                var ip: String = "",
-                var ipv6: String? = null,
-                var mtu: Int? = null,
-                var udp: Boolean? = null,
-                var remoteDNS: List<String>? = null,
-                var host: String? = null,
-                var path: String? = null,
-                var url: String? = null,
-            )'''
-    if old_bean in c:
-        c = c.replace(old_bean, new_bean, 1)
+    # 3b. resolvePolicyGroupProfiles: allow CUSTOM, still block nested groups
+    old_filter = '''                .filter { !it.configType.isComplexType() }
+                .toList()
+        } catch (e: Exception) {
+            LogUtil.e(AppConfig.TAG, "Failed to resolve policy group profiles for '${config.remarks}'", e)'''
+    new_filter = '''                .filter { !it.configType.isGroupType() }
+                .toList()
+        } catch (e: Exception) {
+            LogUtil.e(AppConfig.TAG, "Failed to resolve policy group profiles for '${config.remarks}'", e)'''
+    if old_filter in c:
+        c = c.replace(old_filter, new_filter, 1)
         changed = True
-        print("✓ V2rayConfig: added MasqueConfig data class")
+        print("✓ CoreConfigContextBuilder: policy group now accepts CUSTOM")
     else:
-        print("⚠ V2rayConfig: WireGuardBean not found")
+        print("⚠ CoreConfigContextBuilder: policy group filter not matched")
+
+    # 3c. resolveProxyChainProfiles: same treatment
+    old_chain_filter = '''                .filter { !it.configType.isComplexType() }
+                .toList()
+                .reversed()'''
+    new_chain_filter = '''                .filter { !it.configType.isGroupType() }
+                .toList()
+                .reversed()'''
+    if old_chain_filter in c:
+        c = c.replace(old_chain_filter, new_chain_filter, 1)
+        changed = True
+        print("✓ CoreConfigContextBuilder: proxy chain now accepts CUSTOM")
+    else:
+        print("⚠ CoreConfigContextBuilder: proxy chain filter not matched")
+
+    # 3d. resolveFallbackOutbounds: allow CUSTOM fallbacks
+    old_fb = '''                    ?.takeUnless { it.configType == EConfigType.CUSTOM || it.configType == EConfigType.POLICYGROUP }'''
+    new_fb = '''                    ?.takeUnless { it.configType == EConfigType.POLICYGROUP }'''
+    if old_fb in c:
+        c = c.replace(old_fb, new_fb, 1)
+        changed = True
+        print("✓ CoreConfigContextBuilder: fallback outbound accepts CUSTOM")
+    else:
+        print("⚠ CoreConfigContextBuilder: fallback filter not matched")
 
     if changed:
         backup_kotlin(p)
@@ -173,11 +207,7 @@ def patch_v2rayconfig():
 
 
 # ----------------------------------------------------------------------
-# 5. CoreOutboundBuilder.kt
-#    5a. dispatch case
-#    5b. createInitOutbound MASQUE branch
-#    5c. mux-disable list
-#    5d. toOutboundMasque function
+# 4. CoreOutboundBuilder.kt – convert a CUSTOM profile to an outbound
 # ----------------------------------------------------------------------
 def patch_coreoutboundbuilder():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreOutboundBuilder.kt"
@@ -187,148 +217,77 @@ def patch_coreoutboundbuilder():
     c = read(p)
     changed = False
 
-    # 5a. Dispatch
-    if "EConfigType.MASQUE -> toOutboundMasque" not in c:
-        old_dispatch = '''            EConfigType.HYSTERIA2 -> toOutboundHysteria2(profileItem)
-            EConfigType.HTTP -> toOutboundHttp(profileItem)
+    # 4a. Dispatch
+    if "EConfigType.CUSTOM -> toOutboundCustom" not in c:
+        old_dispatch = '''            EConfigType.HTTP -> toOutboundHttp(profileItem)
             else -> null'''
-        new_dispatch = '''            EConfigType.HYSTERIA2 -> toOutboundHysteria2(profileItem)
-            EConfigType.HTTP -> toOutboundHttp(profileItem)
-            EConfigType.MASQUE -> toOutboundMasque(profileItem)
+        new_dispatch = '''            EConfigType.HTTP -> toOutboundHttp(profileItem)
+            EConfigType.CUSTOM -> toOutboundCustom(profileItem)
             else -> null'''
         if old_dispatch in c:
             c = c.replace(old_dispatch, new_dispatch, 1)
             changed = True
-            print("✓ CoreOutboundBuilder: added MASQUE dispatch case")
+            print("✓ CoreOutboundBuilder: added CUSTOM dispatch case")
         else:
-            print("⚠ CoreOutboundBuilder: dispatch switch not found")
+            print("⚠ CoreOutboundBuilder: dispatch switch not matched")
+
+    # 4b. Skip global mux override for CUSTOM
+    old_ret = '''        outbound ?: return null
+        val ret = updateOutboundWithGlobalSettings(outbound)
+        if (!ret) return null
+        return outbound'''
+    new_ret = '''        outbound ?: return null
+        // CUSTOM carries its own transport/mux settings; do not apply the
+        // app-global mux toggle on top of it.
+        if (profileItem.configType != EConfigType.CUSTOM) {
+            val ret = updateOutboundWithGlobalSettings(outbound)
+            if (!ret) return null
+        }
+        return outbound'''
+    if old_ret in c and "CUSTOM carries its own" not in c:
+        c = c.replace(old_ret, new_ret, 1)
+        changed = True
+        print("✓ CoreOutboundBuilder: skip global mux override for CUSTOM")
+    elif "CUSTOM carries its own" in c:
+        print("• CoreOutboundBuilder: global-mux skip already present")
     else:
-        print("• CoreOutboundBuilder: dispatch case already present")
+        print("⚠ CoreOutboundBuilder: convert() tail not matched")
 
-    # 5b. createInitOutbound MASQUE branch
-    if "EConfigType.MASQUE -> OutboundBean(" not in c:
-        old_init = '''        EConfigType.HYSTERIA,
-        EConfigType.HYSTERIA2 -> OutboundBean(
-            protocol = EConfigType.HYSTERIA.name.lowercase(),
-            settings = OutSettingsBean(),
-            streamSettings = OutboundBean.StreamSettingsBean()
-        )
-
-        else -> null'''
-        new_init = '''        EConfigType.HYSTERIA,
-        EConfigType.HYSTERIA2 -> OutboundBean(
-            protocol = EConfigType.HYSTERIA.name.lowercase(),
-            settings = OutSettingsBean(),
-            streamSettings = OutboundBean.StreamSettingsBean()
-        )
-
-        EConfigType.MASQUE -> OutboundBean(
-            protocol = EConfigType.MASQUE.name.lowercase(),
-            settings = OutSettingsBean(
-                secretKey = "",
-                masque = OutSettingsBean.MasqueConfig()
-            )
-        )
-
-        else -> null'''
-        if old_init in c:
-            c = c.replace(old_init, new_init, 1)
-            changed = True
-            print("✓ CoreOutboundBuilder: added MASQUE to createInitOutbound")
-        else:
-            print("⚠ CoreOutboundBuilder: createInitOutbound tail not found")
-    else:
-        print("• CoreOutboundBuilder: createInitOutbound already has MASQUE")
-
-    # 5c. Mux-disable list
-    if "EConfigType.MASQUE.name" not in c:
-        old_mux = '''                || protocol.equals(EConfigType.HYSTERIA2.name, true)
-                || protocol.equals(EConfigType.HYSTERIA.name, true)
-            ) {'''
-        new_mux = '''                || protocol.equals(EConfigType.HYSTERIA2.name, true)
-                || protocol.equals(EConfigType.HYSTERIA.name, true)
-                || protocol.equals(EConfigType.MASQUE.name, true)
-            ) {'''
-        if old_mux in c:
-            c = c.replace(old_mux, new_mux, 1)
-            changed = True
-            print("✓ CoreOutboundBuilder: added MASQUE to mux-disable list")
-        else:
-            print("⚠ CoreOutboundBuilder: mux-disable list not matched")
-    else:
-        print("• CoreOutboundBuilder: mux-disable already includes MASQUE")
-
-    # 5d. Add toOutboundMasque function
-    if "private fun toOutboundMasque" not in c:
+    # 4c. The conversion function itself
+    if "private fun toOutboundCustom" not in c:
         last_brace = c.rfind('}')
         if last_brace == -1:
             print("⚠ CoreOutboundBuilder: closing brace not found")
         else:
-            masque_func = '''
-    private fun toOutboundMasque(profileItem: ProfileItem): OutboundBean? {
-        val outboundBean = createInitOutbound(EConfigType.MASQUE) ?: return null
-
-        val rawAddresses = profileItem.localAddress
-            ?.split(",")
-            ?.map { it.trim() }
-            ?.filter { it.isNotEmpty() }
-            ?.ifEmpty { null }
-            ?: listOf(AppConfig.WIREGUARD_LOCAL_ADDRESS_V4)
-
-        val addresses = if (MmkvManager.decodeSettingsBool(AppConfig.PREF_IPV6_ENABLED) == true) {
-            rawAddresses
-        } else {
-            val ipv4Addresses = rawAddresses.filter { !it.contains(":") }
-            ipv4Addresses.ifEmpty { listOf(AppConfig.WIREGUARD_LOCAL_ADDRESS_V4) }
+            func = '''
+    /**
+     * Extracts the proxy outbound from a CUSTOM profile's raw JSON.
+     * The tag is cleared so the caller can assign its own.
+     */
+    private fun toOutboundCustom(profileItem: ProfileItem): OutboundBean? {
+        val raw = profileItem.customConfigRaw ?: return null
+        return try {
+            val full = JsonUtil.fromJson(raw, V2rayConfig::class.java) ?: return null
+            val proxy = full.getProxyOutbound() ?: return null
+            // Round-trip through JSON to obtain an isolated copy we can
+            // mutate freely without touching the parsed source config.
+            val copy = JsonUtil.fromJson(
+                JsonUtil.toJson(proxy),
+                OutboundBean::class.java
+            ) ?: return null
+            copy.tag = ""
+            copy
+        } catch (e: Exception) {
+            LogUtil.e(AppConfig.TAG, "Failed to extract outbound from CUSTOM profile", e)
+            null
         }
-
-        val rawDNS = profileItem.remoteDNS
-            ?.split(",")
-            ?.map { it.trim() }
-            ?.filter { it.isNotEmpty() }
-            ?.ifEmpty { null }
-            ?: listOf(AppConfig.WIREGUARD_LOCAL_REMOTE_DNS)
-
-        val remotes = if (MmkvManager.decodeSettingsBool(AppConfig.PREF_IPV6_ENABLED) == true) {
-            rawDNS
-        } else {
-            val ipv4Dns = rawDNS.filter { !it.contains(":") }
-            ipv4Dns.ifEmpty { listOf(AppConfig.WIREGUARD_LOCAL_REMOTE_DNS) }
-        }
-
-        val serverAddr = getServerAddress(profileItem)
-        val serverPort = profileItem.serverPort.orEmpty().toIntOrNull() ?: 443
-
-        outboundBean.settings?.let { settings ->
-            settings.address = serverAddr
-            settings.port = serverPort
-            settings.secretKey = profileItem.secretKey
-            settings.mtu = profileItem.mtu
-            settings.remoteDNS = remotes
-            settings.masque = OutboundBean.OutSettingsBean.MasqueConfig(
-                server = serverAddr,
-                port = serverPort,
-                privateKey = profileItem.secretKey.orEmpty(),
-                publicKey = profileItem.publicKey.orEmpty(),
-                ip = addresses.firstOrNull() ?: AppConfig.WIREGUARD_LOCAL_ADDRESS_V4,
-                ipv6 = addresses.firstOrNull { it.contains(":") },
-                mtu = profileItem.mtu,
-                udp = true,
-                remoteDNS = remotes,
-                host = profileItem.masqueHost,
-                path = profileItem.masquePath,
-                url = profileItem.masqueUrl,
-            )
-        }
-
-        return outboundBean
     }
 '''
-            c = c[:last_brace] + masque_func + c[last_brace:]
+            c = c[:last_brace] + func + c[last_brace:]
             changed = True
-            print("✓ CoreOutboundBuilder: added toOutboundMasque function")
+            print("✓ CoreOutboundBuilder: added toOutboundCustom")
     else:
-        print("• CoreOutboundBuilder: toOutboundMasque already present")
+        print("• CoreOutboundBuilder: toOutboundCustom already present")
 
     if changed:
         backup_kotlin(p)
@@ -336,356 +295,239 @@ def patch_coreoutboundbuilder():
 
 
 # ----------------------------------------------------------------------
-# 6. MasqueFmt.kt – new formatter
+# 5. CoreConfigManager.kt – thread dedup map into chain handler
 # ----------------------------------------------------------------------
-def create_masque_formatter():
-    p = BASE / "app/src/main/java/com/v2ray/ang/fmt/MasqueFmt.kt"
-    if p.exists():
-        print("• MasqueFmt.kt already exists")
-        return
-
-    content = '''package com.v2ray.ang.fmt
-
-import com.v2ray.ang.AppConfig
-import com.v2ray.ang.dto.entities.ProfileItem
-import com.v2ray.ang.enums.EConfigType
-import com.v2ray.ang.extension.idnHost
-import com.v2ray.ang.extension.nullIfBlank
-import com.v2ray.ang.extension.removeWhiteSpace
-import com.v2ray.ang.util.Utils
-import java.net.URI
-
-object MasqueFmt : FmtBase() {
-    fun parse(str: String): ProfileItem? {
-        val config = ProfileItem.create(EConfigType.MASQUE)
-
-        val uri = URI(Utils.fixIllegalUrl(str))
-        if (uri.rawQuery.isNullOrEmpty()) return null
-        val queryParam = getQueryParam(uri)
-
-        config.remarks = Utils.decodeURIComponent(uri.fragment.orEmpty()).let { it.ifEmpty { "none" } }
-        config.server = uri.idnHost
-        config.serverPort = uri.port.toString()
-
-        config.secretKey = uri.userInfo.orEmpty()
-        config.localAddress = queryParam["address"] ?: AppConfig.WIREGUARD_LOCAL_ADDRESS_V4
-        config.publicKey = queryParam["publickey"].orEmpty()
-        config.preSharedKey = queryParam["presharedkey"]?.nullIfBlank()
-        config.mtu = Utils.parseInt(queryParam["mtu"] ?: AppConfig.WIREGUARD_LOCAL_MTU)
-        config.remoteDNS = queryParam["dns"] ?: AppConfig.WIREGUARD_LOCAL_REMOTE_DNS
-        config.reserved = queryParam["reserved"] ?: "0,0,0"
-        config.masqueHost = queryParam["host"]
-        config.masquePath = queryParam["path"]
-        config.masqueUrl = queryParam["url"]
-        config.finalMask = (queryParam["fm"] ?: queryParam["finalmask"] ?: queryParam["finalMask"])?.nullIfBlank()
-
-        return config
-    }
-
-    fun toUri(config: ProfileItem): String {
-        val dicQuery = HashMap<String, String>()
-
-        dicQuery["publickey"] = config.publicKey.orEmpty()
-        if (config.reserved != null) {
-            dicQuery["reserved"] = config.reserved.removeWhiteSpace().orEmpty()
-        }
-        dicQuery["address"] = config.localAddress.removeWhiteSpace().orEmpty()
-        if (config.mtu != null) {
-            dicQuery["mtu"] = config.mtu.toString()
-        }
-        if (config.preSharedKey != null) {
-            dicQuery["presharedkey"] = config.preSharedKey.removeWhiteSpace().orEmpty()
-        }
-        if (config.remoteDNS != null) {
-            dicQuery["dns"] = config.remoteDNS.removeWhiteSpace().orEmpty()
-        }
-        config.masqueHost?.let { dicQuery["host"] = it }
-        config.masquePath?.let { dicQuery["path"] = it }
-        config.masqueUrl?.let { dicQuery["url"] = it }
-        config.finalMask?.nullIfBlank()?.let { dicQuery["fm"] = it }
-
-        return toUri(config, config.secretKey, dicQuery)
-    }
-}
-'''
-    p.write_text(content, encoding="utf-8")
-    print("✓ Created MasqueFmt.kt")
-
-
-# ----------------------------------------------------------------------
-# 7. AngConfigManager.kt – register MASQUE formatter + share case
-# ----------------------------------------------------------------------
-def patch_angconfigmanager():
-    p = BASE / "app/src/main/java/com/v2ray/ang/handler/AngConfigManager.kt"
+def patch_coreconfigmanager():
+    p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
     if not p.exists():
-        print("✗ AngConfigManager.kt not found")
+        print("✗ CoreConfigManager.kt not found")
         return
     c = read(p)
     changed = False
 
-    if "import com.v2ray.ang.fmt.MasqueFmt" not in c:
-        c = c.replace(
-            "import com.v2ray.ang.fmt.Hysteria2Fmt",
-            "import com.v2ray.ang.fmt.Hysteria2Fmt\nimport com.v2ray.ang.fmt.MasqueFmt",
-            1,
-        )
-        changed = True
-        print("✓ AngConfigManager: added MasqueFmt import")
-
-    old_map = '''            EConfigType.HYSTERIA2.protocolScheme to Hysteria2Fmt::parse,
-            AppConfig.HY2 to Hysteria2Fmt::parse,'''
-    new_map = '''            EConfigType.HYSTERIA2.protocolScheme to Hysteria2Fmt::parse,
-            EConfigType.MASQUE.protocolScheme to MasqueFmt::parse,
-            AppConfig.HY2 to Hysteria2Fmt::parse,'''
-    if "EConfigType.MASQUE.protocolScheme to MasqueFmt::parse" not in c:
-        if old_map in c:
-            c = c.replace(old_map, new_map, 1)
-            changed = True
-            print("✓ AngConfigManager: registered MasqueFmt in parser map")
-        else:
-            print("⚠ AngConfigManager: parser map insertion point not found")
-    else:
-        print("• AngConfigManager: MasqueFmt already in parser map")
-
-    # shareConfig: add MASQUE case
-    old_share = '''                EConfigType.HYSTERIA2 -> Hysteria2Fmt.toUri(config)
-                else -> {}'''
-    new_share = '''                EConfigType.HYSTERIA2 -> Hysteria2Fmt.toUri(config)
-                EConfigType.MASQUE -> MasqueFmt.toUri(config)
-                else -> {}'''
-    if "EConfigType.MASQUE -> MasqueFmt.toUri" not in c:
-        if old_share in c:
-            c = c.replace(old_share, new_share, 1)
-            changed = True
-            print("✓ AngConfigManager: added MASQUE to shareConfig")
-        else:
-            print("⚠ AngConfigManager: shareConfig HYSTERIA2 not found")
-    else:
-        print("• AngConfigManager: MASQUE share case already present")
-
-    if changed:
-        backup_kotlin(p)
-        write(p, c)
-
-
-# ----------------------------------------------------------------------
-# 8. strings.xml – MASQUE UI strings
-# ----------------------------------------------------------------------
-def patch_strings():
-    p = BASE / "app/src/main/res/values/strings.xml"
-    if not p.exists():
-        print("✗ strings.xml not found")
-        return
-    c = read(p)
-
-    needed = {
-        "menu_item_import_config_manually_masque": "Add [MASQUE]",
-        "server_lab_masque_host": "MASQUE Host (optional)",
-        "server_lab_masque_path": "MASQUE Path (optional)",
-        "server_lab_masque_url": "MASQUE URL (optional)",
-    }
-    new_strings = []
-    for k, v in needed.items():
-        if f'name="{k}"' in c:
-            continue
-        new_strings.append(f'    <string name="{k}">{v}</string>')
-
-    if not new_strings:
-        print("• strings.xml: MASQUE strings already present")
-        return
-
-    m = re.search(r'(\s*)</resources>', c, re.IGNORECASE)
-    if m:
-        indent, pos = m.group(1), m.start()
-        insertion = "\n" + "\n".join(new_strings) + "\n" + indent
-        c = c[:pos] + insertion + c[pos:]
-        write(p, c)
-        print(f"✓ strings.xml: added {len(new_strings)} MASQUE strings")
-    else:
-        print("⚠ strings.xml: </resources> not found")
-
-
-# ----------------------------------------------------------------------
-# 9. ServerMasqueActivity.kt
-# ----------------------------------------------------------------------
-def create_server_activity():
-    p = BASE / "app/src/main/java/com/v2ray/ang/ui/server/ServerMasqueActivity.kt"
-    if p.exists():
-        print("• ServerMasqueActivity.kt already exists")
-        return
-
-    content = '''package com.v2ray.ang.ui.server
-
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.ui.res.stringResource
-import com.v2ray.ang.R
-import com.v2ray.ang.enums.EConfigType
-import com.v2ray.ang.ui.compose.FormTextField
-
-class ServerMasqueActivity : BaseServerActivity() {
-
-    override val serverConfigType: EConfigType = EConfigType.MASQUE
-
-    @Composable
-    override fun ScreenContent() {
-        val uiState = rememberSaveable(saver = ServerUiState.Saver) {
-            ServerUiState.from(
-                initialConfig = initialConfig
+    # 5a. Create the dedup map once per build
+    if "val chainHopDedup" not in c:
+        old_call = '''        // User routing rules (policyGroupBalancerTags rewrites TAG_PROXY→balancer when main is POLICYGROUP).
+        configureRouting(configContext, v2rayConfig, policyGroupBalancerTags)'''
+        new_call = '''        // User routing rules (policyGroupBalancerTags rewrites TAG_PROXY→balancer when main is POLICYGROUP).
+        configureRouting(configContext, v2rayConfig, policyGroupBalancerTags)'''
+        # We insert the map declaration just before the forEachIndexed loop
+        old_loop = '''        configContext.resolvedOutbounds.forEachIndexed { index, spec ->
+            buildOutbounds(
+                resolvedOutbound = spec,
+                prepend = index == 0,
+                existingTags = existingTags,
+                v2rayConfig = v2rayConfig,
+                policyGroupBalancerTags = policyGroupBalancerTags,
+                balancerStrategies = balancerStrategies,
             )
-        }.apply {
-            configType = EConfigType.MASQUE
-        }
-
-        ServerEditorScaffold(
-            title = serverConfigType.toString(),
-            onSaveClick = { saveServer(uiState) }
-        ) {
-            CommonBasicFields(uiState)
-            MasqueProtocolFields(uiState)
-        }
-    }
-
-    @Composable
-    private fun MasqueProtocolFields(state: ServerUiState) {
-        FormTextField(
-            stringResource(R.string.server_lab_secret_key),
-            state.secretKey,
-            { state.secretKey = it }
-        )
-        FormTextField(
-            stringResource(R.string.server_lab_public_key),
-            state.publicKey,
-            { state.publicKey = it }
-        )
-        FormTextField(
-            stringResource(R.string.server_lab_preshared_key),
-            state.preSharedKey,
-            { state.preSharedKey = it }
-        )
-        FormTextField(
-            stringResource(R.string.server_lab_local_address),
-            state.localAddress,
-            { state.localAddress = it }
-        )
-        FormTextField(
-            stringResource(R.string.server_lab_local_mtu),
-            state.mtu,
-            { state.mtu = it }
-        )
-        FormTextField(
-            stringResource(R.string.server_lab_remote_dns),
-            state.remoteDNS,
-            { state.remoteDNS = it }
-        )
-        FormTextField(
-            stringResource(R.string.server_lab_masque_host),
-            state.masqueHost,
-            { state.masqueHost = it }
-        )
-        FormTextField(
-            stringResource(R.string.server_lab_masque_path),
-            state.masquePath,
-            { state.masquePath = it }
-        )
-        FormTextField(
-            stringResource(R.string.server_lab_masque_url),
-            state.masqueUrl,
-            { state.masqueUrl = it }
-        )
-        FormTextField(
-            stringResource(R.string.server_lab_final_mask),
-            state.finalMask,
-            { state.finalMask = it }
-        )
-    }
-}
-'''
-    p.write_text(content, encoding="utf-8")
-    print("✓ Created ServerMasqueActivity.kt")
-
-
-# ----------------------------------------------------------------------
-# 10. ServerUiState.kt – add MASQUE fields (FIXED)
-# ----------------------------------------------------------------------
-def patch_serveruistate():
-    p = BASE / "app/src/main/java/com/v2ray/ang/ui/server/ServerUiState.kt"
-    if not p.exists():
-        print("✗ ServerUiState.kt not found")
-        return
-    c = read(p)
-
-    if "masqueHost" in c:
-        print("• ServerUiState: MASQUE fields already present")
-        return
-
-    changed = False
-
-    # (a) primary constructor param — NO `var`, matches the actual file
-    old_ctor = '    browserDialerMode: String = "",'
-    new_ctor = '''    browserDialerMode: String = "",
-    masqueHost: String = "",
-    masquePath: String = "",
-    masqueUrl: String = "",'''
-    if old_ctor in c:
-        c = c.replace(old_ctor, new_ctor, 1)
-        changed = True
-        print("✓ ServerUiState: added MASQUE constructor params")
+        }'''
+        new_loop = '''        // Shared across every chain built in this config: lets identical
+        // hops (e.g. a subscription-wide entry/exit proxy) reuse a single
+        // outbound instead of emitting one per consumer.
+        val chainHopDedup = mutableMapOf<String, String>()
+        configContext.resolvedOutbounds.forEachIndexed { index, spec ->
+            buildOutbounds(
+                resolvedOutbound = spec,
+                prepend = index == 0,
+                existingTags = existingTags,
+                v2rayConfig = v2rayConfig,
+                policyGroupBalancerTags = policyGroupBalancerTags,
+                balancerStrategies = balancerStrategies,
+                chainHopDedup = chainHopDedup,
+            )
+        }'''
+        if old_loop in c:
+            c = c.replace(old_loop, new_loop, 1)
+            changed = True
+            print("✓ CoreConfigManager: created chainHopDedup map")
+        else:
+            print("⚠ CoreConfigManager: buildOutbounds loop not matched")
     else:
-        print("⚠ ServerUiState: browserDialerMode constructor param not found")
+        print("• CoreConfigManager: chainHopDedup already present")
 
-    # (b) class body property delegate
-    old_prop = '    var browserDialerMode by mutableStateOf(browserDialerMode)'
-    new_prop = '''    var browserDialerMode by mutableStateOf(browserDialerMode)
-    var masqueHost by mutableStateOf(masqueHost)
-    var masquePath by mutableStateOf(masquePath)
-    var masqueUrl by mutableStateOf(masqueUrl)'''
-    if old_prop in c:
-        c = c.replace(old_prop, new_prop, 1)
+    # 5b. Extend buildOutbounds signature
+    old_sig = '''    private fun buildOutbounds(
+        resolvedOutbound: CoreConfigContext.ResolvedOutbound,
+        prepend: Boolean,
+        existingTags: MutableSet<String>,
+        v2rayConfig: V2rayConfig,
+        policyGroupBalancerTags: MutableMap<String, String>,
+        balancerStrategies: MutableList<BalancerStrategy>,
+    ) {'''
+    new_sig = '''    private fun buildOutbounds(
+        resolvedOutbound: CoreConfigContext.ResolvedOutbound,
+        prepend: Boolean,
+        existingTags: MutableSet<String>,
+        v2rayConfig: V2rayConfig,
+        policyGroupBalancerTags: MutableMap<String, String>,
+        balancerStrategies: MutableList<BalancerStrategy>,
+        chainHopDedup: MutableMap<String, String>,
+    ) {'''
+    if old_sig in c:
+        c = c.replace(old_sig, new_sig, 1)
         changed = True
-        print("✓ ServerUiState: added MASQUE property delegates")
+        print("✓ CoreConfigManager: extended buildOutbounds signature")
     else:
-        print("⚠ ServerUiState: browserDialerMode property not found")
+        print("• CoreConfigManager: buildOutbounds signature unchanged or already extended")
 
-    # (c) fromProfileItem: append masque fields after the browserDialerMode line
-    m = re.search(
-        r'^(\s*)browserDialerMode\s*=\s*initialConfig\.browserDialerMode.*$',
-        c, re.MULTILINE,
+    # 5c. Forward to chain handler
+    old_chain_call = '''            CoreResolvedType.PROXYCHAIN -> handleProxyChainResolvedOutbound(
+                resolvedOutbound = resolvedOutbound,
+                prepend = prepend,
+                existingTags = existingTags,
+                v2rayConfig = v2rayConfig,
+            )'''
+    new_chain_call = '''            CoreResolvedType.PROXYCHAIN -> handleProxyChainResolvedOutbound(
+                resolvedOutbound = resolvedOutbound,
+                prepend = prepend,
+                existingTags = existingTags,
+                v2rayConfig = v2rayConfig,
+                chainHopDedup = chainHopDedup,
+            )'''
+    if old_chain_call in c:
+        c = c.replace(old_chain_call, new_chain_call, 1)
+        changed = True
+        print("✓ CoreConfigManager: forwarded chainHopDedup to chain handler")
+    else:
+        print("• CoreConfigManager: PROXYCHAIN call already updated or not matched")
+
+    # 5d. Rewrite handleProxyChainResolvedOutbound
+    old_handler_pat = re.compile(
+        r'    private fun handleProxyChainResolvedOutbound\(\s*'
+        r'resolvedOutbound: CoreConfigContext\.ResolvedOutbound,\s*'
+        r'prepend: Boolean,\s*'
+        r'existingTags: MutableSet<String>,\s*'
+        r'v2rayConfig: V2rayConfig,\s*'
+        r'\) \{.*?\n    \}',
+        re.DOTALL,
     )
-    if m and "masqueHost = initialConfig.masqueHost" not in c:
-        indent = m.group(1)
-        addition = (
-            f"\n{indent}masqueHost = initialConfig.masqueHost ?: \"\","
-            f"\n{indent}masquePath = initialConfig.masquePath ?: \"\","
-            f"\n{indent}masqueUrl = initialConfig.masqueUrl ?: \"\","
-        )
-        c = c[:m.end()] + addition + c[m.end():]
-        changed = True
-        print("✓ ServerUiState: added MASQUE fields to fromProfileItem")
-    elif m:
-        print("• ServerUiState: fromProfileItem already has MASQUE")
-    else:
-        print("⚠ ServerUiState: fromProfileItem mapping not found")
-
-    # (d) toProfileItem: append masque fields after the browserDialerMode block
-    old_to = '''            browserDialerMode = if (network in listOf(NetworkType.WS.type, NetworkType.XHTTP.type)) {
-                browserDialerMode.nullIfBlank()
+    m = old_handler_pat.search(c)
+    if m:
+        new_handler = '''    private fun handleProxyChainResolvedOutbound(
+        resolvedOutbound: CoreConfigContext.ResolvedOutbound,
+        prepend: Boolean,
+        existingTags: MutableSet<String>,
+        v2rayConfig: V2rayConfig,
+        chainHopDedup: MutableMap<String, String>,
+    ) {
+        val chainOutbounds = resolvedOutbound.resolvedProfiles
+            .mapNotNull { convertProfile2Outbound(it) }
+            .toMutableList()
+        if (chainOutbounds.isEmpty()) {
+            LogUtil.w(AppConfig.TAG, "PROXYCHAIN resolved outbound '${resolvedOutbound.tag}' has no valid profiles, skipping")
+            return
+        }
+        if (chainOutbounds.size == 1) {
+            val outbound = chainOutbounds.first()
+            outbound.tag = resolvedOutbound.tag
+            if (prepend) {
+                v2rayConfig.outbounds.add(0, outbound)
             } else {
-                null
-            },'''
-    new_to = old_to + '''
-            masqueHost = masqueHost.nullIfBlank(),
-            masquePath = masquePath.nullIfBlank(),
-            masqueUrl = masqueUrl.nullIfBlank(),'''
-    if "masqueHost = masqueHost.nullIfBlank()" not in c:
-        if old_to in c:
-            c = c.replace(old_to, new_to, 1)
-            changed = True
-            print("✓ ServerUiState: added MASQUE fields to toProfileItem")
-        else:
-            print("⚠ ServerUiState: toProfileItem browserDialerMode block not found")
+                v2rayConfig.outbounds.add(outbound)
+            }
+            existingTags.add(resolvedOutbound.tag)
+            return
+        }
+
+        val n = chainOutbounds.size
+
+        // Compute a suffix signature for every hop: content of this hop
+        // concatenated with the signature of everything after it. Two
+        // chains that share a suffix therefore produce the same signature
+        // at the first shared index, which lets us reuse a single outbound
+        // for that suffix.
+        val suffixSig = arrayOfNulls<String>(n + 1)
+        suffixSig[n] = ""
+        for (i in n - 1 downTo 0) {
+            chainOutbounds[i].tag = ""
+            suffixSig[i] = outboundContentSignature(chainOutbounds[i]) +
+                    "\\u0001" + suffixSig[i + 1]
+        }
+
+        // Hop 0 always gets the chain's primary tag and is never deduped:
+        // routing rules reference it directly.
+        if (resolvedOutbound.tag in existingTags) {
+            LogUtil.w(
+                AppConfig.TAG,
+                "PROXYCHAIN resolved outbound '${resolvedOutbound.tag}' has colliding hop tags, skipping"
+            )
+            return
+        }
+        chainOutbounds[0].tag = resolvedOutbound.tag
+        existingTags.add(resolvedOutbound.tag)
+
+        val newHops = mutableListOf<Pair<Int, V2rayConfig.OutboundBean>>()
+        newHops.add(0 to chainOutbounds[0])
+        val chainTags = MutableList(n) { "" }
+        chainTags[0] = resolvedOutbound.tag
+
+        for (i in 1 until n) {
+            val hop = chainOutbounds[i]
+            val sig = suffixSig[i]!!
+            val existingTag = chainHopDedup[sig]
+            if (existingTag != null) {
+                chainTags[i] = existingTag
+                // Hop outbound already lives in the config from a prior chain.
+            } else {
+                val newTag = "${AppConfig.TAG_PROXY}-${resolvedOutbound.tag}-$i"
+                if (newTag in existingTags) {
+                    LogUtil.w(
+                        AppConfig.TAG,
+                        "PROXYCHAIN resolved outbound '${resolvedOutbound.tag}' has colliding hop tags, skipping"
+                    )
+                    return
+                }
+                hop.tag = newTag
+                chainTags[i] = newTag
+                newHops.add(i to hop)
+                existingTags.add(newTag)
+                chainHopDedup[sig] = newTag
+            }
+        }
+
+        // Wire dialerProxy on each newly added hop to its successor.
+        newHops.forEach { (idx, outbound) ->
+            if (idx < n - 1) {
+                outbound.ensureSockopt().dialerProxy = chainTags[idx + 1]
+            }
+        }
+
+        val toAdd = newHops.map { it.second }
+        if (prepend) {
+            v2rayConfig.outbounds.addAll(0, toAdd)
+        } else {
+            v2rayConfig.outbounds.addAll(toAdd)
+        }
+    }
+
+    /**
+     * Canonical content signature of an outbound. Ignores the tag and the
+     * chain-specific dialerProxy so identical hops compare equal regardless
+     * of where they appear in a chain.
+     */
+    private fun outboundContentSignature(outbound: V2rayConfig.OutboundBean): String {
+        val json = try {
+            JsonUtil.toJson(outbound)
+        } catch (_: Exception) {
+            return ""
+        }
+        val obj = try {
+            JsonUtil.parseString(json)
+        } catch (_: Exception) {
+            null
+        } ?: return json
+        obj.remove("tag")
+        obj.getAsJsonObject("streamSettings")
+            ?.getAsJsonObject("sockopt")
+            ?.remove("dialerProxy")
+        return obj.toString()
+    }'''
+        c = c[:m.start()] + new_handler + c[m.end():]
+        changed = True
+        print("✓ CoreConfigManager: rewrote handleProxyChainResolvedOutbound with dedup")
     else:
-        print("• ServerUiState: toProfileItem already has MASQUE")
+        print("⚠ CoreConfigManager: handleProxyChainResolvedOutbound not matched")
 
     if changed:
         backup_kotlin(p)
@@ -693,55 +535,102 @@ def patch_serveruistate():
 
 
 # ----------------------------------------------------------------------
-# 11. MainActivity.kt – MASQUE import branch
+# 6. Make CUSTOM profiles selectable in the UI pickers
 # ----------------------------------------------------------------------
-def patch_mainactivity():
-    p = BASE / "app/src/main/java/com/v2ray/ang/ui/main/MainActivity.kt"
+def patch_serverproxychain_activity():
+    p = BASE / "app/src/main/java/com/v2ray/ang/ui/server/ServerProxyChainActivity.kt"
     if not p.exists():
-        print("✗ MainActivity.kt not found")
+        print("✗ ServerProxyChainActivity.kt not found")
+        return
+    c = read(p)
+    changed = False
+
+    old_list = '''        allRemarks = SettingsManager.getProfileRemarks(
+            excludeConfigTypes = setOf(EConfigType.CUSTOM, EConfigType.POLICYGROUP, EConfigType.PROXYCHAIN)
+        )'''
+    new_list = '''        allRemarks = SettingsManager.getProfileRemarks(
+            excludeConfigTypes = setOf(EConfigType.POLICYGROUP, EConfigType.PROXYCHAIN)
+        )'''
+    if old_list in c:
+        c = c.replace(old_list, new_list, 1)
+        changed = True
+        print("✓ ServerProxyChainActivity: CUSTOM added to picker")
+    else:
+        print("• ServerProxyChainActivity: picker filter already updated or not matched")
+
+    old_valid = '''        val invalidMembers = chainMembers.filter { member ->
+            val profile = SettingsManager.getServerViaRemarks(member)
+            profile == null || profile.configType.isComplexType()
+        }'''
+    new_valid = '''        val invalidMembers = chainMembers.filter { member ->
+            val profile = SettingsManager.getServerViaRemarks(member)
+            profile == null || profile.configType.isGroupType()
+        }'''
+    if old_valid in c:
+        c = c.replace(old_valid, new_valid, 1)
+        changed = True
+        print("✓ ServerProxyChainActivity: validation accepts CUSTOM")
+    else:
+        print("• ServerProxyChainActivity: validation already updated or not matched")
+
+    if changed:
+        backup_kotlin(p)
+        write(p, c)
+
+
+def patch_routingedit_activity():
+    p = BASE / "app/src/main/java/com/v2ray/ang/ui/routing/RoutingEditActivity.kt"
+    if not p.exists():
+        print("✗ RoutingEditActivity.kt not found")
         return
     c = read(p)
 
-    if "ServerMasqueActivity" in c:
-        print("• MainActivity: MASQUE import branch already present")
-        return
+    old = '        val profileRemarks = SettingsManager.getProfileRemarks()'
+    new = ('        val profileRemarks = SettingsManager.getProfileRemarks(\n'
+           '            excludeConfigTypes = setOf(EConfigType.POLICYGROUP, EConfigType.PROXYCHAIN)\n'
+           '        )')
+    if old in c and "EConfigType.POLICYGROUP, EConfigType.PROXYCHAIN" not in c:
+        c = c.replace(old, new, 1)
+        if "import com.v2ray.ang.enums.EConfigType" not in c:
+            c = c.replace(
+                "import com.v2ray.ang.dto.entities.RulesetItem",
+                "import com.v2ray.ang.dto.entities.RulesetItem\nimport com.v2ray.ang.enums.EConfigType",
+                1,
+            )
+        backup_kotlin(p)
+        write(p, c)
+        print("✓ RoutingEditActivity: CUSTOM added to picker")
+    else:
+        print("• RoutingEditActivity: already updated or not matched")
 
-    old = '            EConfigType.HYSTERIA2.value -> Intent(this, ServerHysteria2Activity::class.java)'
-    new = '''            EConfigType.HYSTERIA2.value -> Intent(this, ServerHysteria2Activity::class.java)
-            EConfigType.MASQUE.value -> Intent(this, ServerMasqueActivity::class.java)'''
+
+def patch_subedit_activity():
+    p = BASE / "app/src/main/java/com/v2ray/ang/ui/subscription/SubEditActivity.kt"
+    if not p.exists():
+        print("✗ SubEditActivity.kt not found")
+        return
+    c = read(p)
+
+    old = '''        suggestions = SettingsManager.getProfileRemarks(
+            excludeConfigTypes = setOf(
+                EConfigType.CUSTOM,
+                EConfigType.POLICYGROUP,
+                EConfigType.PROXYCHAIN,
+            )
+        )'''
+    new = '''        suggestions = SettingsManager.getProfileRemarks(
+            excludeConfigTypes = setOf(
+                EConfigType.POLICYGROUP,
+                EConfigType.PROXYCHAIN,
+            )
+        )'''
     if old in c:
         c = c.replace(old, new, 1)
         backup_kotlin(p)
         write(p, c)
-        print("✓ MainActivity: added MASQUE import branch")
+        print("✓ SubEditActivity: CUSTOM added to entry/exit pickers")
     else:
-        print("⚠ MainActivity: HYSTERIA2 import branch not found")
-
-
-# ----------------------------------------------------------------------
-# 12. MainImportMenu.kt – add MASQUE entry
-# ----------------------------------------------------------------------
-def patch_mainimportmenu():
-    p = BASE / "app/src/main/java/com/v2ray/ang/ui/main/MainImportMenu.kt"
-    if not p.exists():
-        print("✗ MainImportMenu.kt not found")
-        return
-    c = read(p)
-
-    if "EConfigType.MASQUE.value" in c:
-        print("• MainImportMenu: MASQUE entry already present")
-        return
-
-    old = '    Hysteria2(R.string.menu_item_import_config_manually_hysteria2, MainAction.ImportManually(EConfigType.HYSTERIA2.value))'
-    new = '''    Hysteria2(R.string.menu_item_import_config_manually_hysteria2, MainAction.ImportManually(EConfigType.HYSTERIA2.value)),
-    Masque(R.string.menu_item_import_config_manually_masque, MainAction.ImportManually(EConfigType.MASQUE.value))'''
-    if old in c:
-        c = c.replace(old, new, 1)
-        backup_kotlin(p)
-        write(p, c)
-        print("✓ MainImportMenu: added MASQUE entry")
-    else:
-        print("⚠ MainImportMenu: Hysteria2 enum entry not found")
+        print("• SubEditActivity: already updated or not matched")
 
 
 # ----------------------------------------------------------------------
@@ -749,21 +638,17 @@ def patch_mainimportmenu():
 # ----------------------------------------------------------------------
 def main():
     print("=" * 70)
-    print("Patcher: Add MASQUE (CONNECT-IP / WARP) outbound support")
+    print("Patcher: CUSTOM everywhere + chain hop dedup")
     print("=" * 70)
     try:
-        patch_econfigtype()
-        patch_appconfig()
         patch_profileitem()
-        patch_v2rayconfig()
+        patch_mmkvmanager()
+        patch_coreconfigcontextbuilder()
         patch_coreoutboundbuilder()
-        create_masque_formatter()
-        patch_angconfigmanager()
-        patch_strings()
-        create_server_activity()
-        patch_serveruistate()
-        patch_mainactivity()
-        patch_mainimportmenu()
+        patch_coreconfigmanager()
+        patch_serverproxychain_activity()
+        patch_routingedit_activity()
+        patch_subedit_activity()
         print("\n✅ Done.")
         print("👉 Rebuild and test.")
     except Exception as e:
