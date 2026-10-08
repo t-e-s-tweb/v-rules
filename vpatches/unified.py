@@ -4,8 +4,9 @@ v2rayNG patcher for 2dust/v2rayNG master
   • Allow CUSTOM profiles in policy groups / proxy chains / routing
   • Deduplicate identical chain-hop outbounds
 
-Uses inline `!= EConfigType.POLICYGROUP && != EConfigType.PROXYCHAIN`
-checks instead of `isGroupType()` so no extra imports are required.
+Self-healing: tolerates files already touched by earlier runs, including
+the broken `isGroupType()` variant. Uses inline `!= EConfigType.X` checks
+so no extension-function import is required.
 
 Idempotent.
 """
@@ -134,7 +135,14 @@ def patch_mmkvmanager():
 
 # ----------------------------------------------------------------------
 # 3. CoreConfigContextBuilder.kt – allow CUSTOM in every sub-outbound slot
-#    (inline type checks, no extra imports)
+#
+#    Self-healing:
+#      • Removes the CUSTOM guard in resolveOutbound if still present.
+#      • Replaces EITHER `.filter { !it.configType.isComplexType() }` OR
+#        `.filter { !it.configType.isGroupType() }` with an inline check,
+#        so both the pristine file and a file already half-patched by an
+#        earlier run end up in the same correct state.
+#      • Relaxes the CUSTOM takeUnless on fallback outbounds.
 # ----------------------------------------------------------------------
 def patch_coreconfigcontextbuilder():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigContextBuilder.kt"
@@ -145,65 +153,66 @@ def patch_coreconfigcontextbuilder():
     changed = False
 
     # 3a. Remove the CUSTOM short-circuit in resolveOutbound
-    old_guard = '''    private fun resolveOutbound(tag: String, profile: ProfileItem): CoreConfigContext.ResolvedOutbound? {
-        if (profile.configType == EConfigType.CUSTOM) {
-            return null
-        }
-'''
-    new_guard = '''    private fun resolveOutbound(tag: String, profile: ProfileItem): CoreConfigContext.ResolvedOutbound? {
-'''
-    if old_guard in c:
-        c = c.replace(old_guard, new_guard, 1)
-        changed = True
-        print("✓ CoreConfigContextBuilder: removed CUSTOM guard in resolveOutbound")
-    else:
-        print("• CoreConfigContextBuilder: resolveOutbound guard already absent")
+    guard_variants = [
+        '        if (profile.configType == EConfigType.CUSTOM) {\n            return null\n        }\n',
+        '        if (profile.configType == EConfigType.CUSTOM) {\n            return null\n        }\r\n',
+    ]
+    for variant in guard_variants:
+        if variant in c:
+            c = c.replace(variant, "", 1)
+            changed = True
+            print("✓ CoreConfigContextBuilder: removed CUSTOM guard in resolveOutbound")
+            break
 
-    # 3b. Policy-group member filter: allow CUSTOM, still block nested groups
-    old_pg = '''                .filter { !it.configType.isComplexType() }
-                .toList()
-        } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "Failed to resolve policy group profiles for '${config.remarks}'", e)'''
-    new_pg = '''                .filter {
-                    it.configType != EConfigType.POLICYGROUP &&
-                            it.configType != EConfigType.PROXYCHAIN
-                }
-                .toList()
-        } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "Failed to resolve policy group profiles for '${config.remarks}'", e)'''
-    if old_pg in c:
-        c = c.replace(old_pg, new_pg, 1)
-        changed = True
-        print("✓ CoreConfigContextBuilder: policy group accepts CUSTOM")
-    else:
-        print("• CoreConfigContextBuilder: policy-group filter unchanged or already applied")
+    # 3b. Replace the policy-group and proxy-chain member filters.
+    #     Matches either the pristine `isComplexType()` or the broken
+    #     `isGroupType()` variant, and leaves a single-line inline check.
+    filt_pat = re.compile(
+        r'^(?P<indent>[ \t]*)\.filter\s*\{\s*!\s*it\.configType\.'
+        r'(?:isComplexType|isGroupType)\(\)\s*\}',
+        re.MULTILINE,
+    )
 
-    # 3c. Proxy-chain member filter: same treatment
-    old_chain = '''                .filter { !it.configType.isComplexType() }
-                .toList()
-                .reversed()'''
-    new_chain = '''                .filter {
-                    it.configType != EConfigType.POLICYGROUP &&
-                            it.configType != EConfigType.PROXYCHAIN
-                }
-                .toList()
-                .reversed()'''
-    if old_chain in c:
-        c = c.replace(old_chain, new_chain, 1)
-        changed = True
-        print("✓ CoreConfigContextBuilder: proxy chain accepts CUSTOM")
-    else:
-        print("• CoreConfigContextBuilder: proxy-chain filter unchanged or already applied")
+    def filt_repl(m):
+        indent = m.group("indent")
+        return (
+            f'{indent}.filter {{ it.configType != EConfigType.POLICYGROUP '
+            f'&& it.configType != EConfigType.PROXYCHAIN }}'
+        )
 
-    # 3d. Fallback outbound: allow CUSTOM fallbacks
-    old_fb = '''                    ?.takeUnless { it.configType == EConfigType.CUSTOM || it.configType == EConfigType.POLICYGROUP }'''
-    new_fb = '''                    ?.takeUnless { it.configType == EConfigType.POLICYGROUP }'''
+    c, n = filt_pat.subn(filt_repl, c)
+    if n > 0:
+        changed = True
+        print(f"✓ CoreConfigContextBuilder: replaced {n} complex-type filter(s) with inline checks")
+    else:
+        # Detect the already-inline form so we can report accurately.
+        if re.search(
+            r'\.filter\s*\{\s*it\.configType\s*!=\s*EConfigType\.POLICYGROUP',
+            c,
+        ):
+            print("• CoreConfigContextBuilder: member filters already inline")
+        else:
+            print("⚠ CoreConfigContextBuilder: member filters not matched")
+
+    # 3c. Relax the fallback outbound takeUnless
+    old_fb = (
+        '?.takeUnless { it.configType == EConfigType.CUSTOM '
+        '|| it.configType == EConfigType.POLICYGROUP }'
+    )
     if old_fb in c:
-        c = c.replace(old_fb, new_fb, 1)
+        c = c.replace(
+            old_fb,
+            '?.takeUnless { it.configType == EConfigType.POLICYGROUP }',
+            1,
+        )
         changed = True
         print("✓ CoreConfigContextBuilder: fallback outbound accepts CUSTOM")
     else:
         print("• CoreConfigContextBuilder: fallback filter unchanged or already applied")
+
+    # 3d. Sanity check: no `isGroupType(` left in the file
+    if re.search(r'\bisGroupType\s*\(', c):
+        print("⚠ CoreConfigContextBuilder: an isGroupType( call remains somewhere — inspect manually")
 
     if changed:
         backup_kotlin(p)
@@ -234,6 +243,8 @@ def patch_coreoutboundbuilder():
             print("✓ CoreOutboundBuilder: added CUSTOM dispatch case")
         else:
             print("⚠ CoreOutboundBuilder: dispatch switch not matched")
+    else:
+        print("• CoreOutboundBuilder: dispatch case already present")
 
     # 4b. Skip global mux override for CUSTOM
     old_ret = '''        outbound ?: return null
@@ -248,7 +259,7 @@ def patch_coreoutboundbuilder():
             if (!ret) return null
         }
         return outbound'''
-    if old_ret in c and "CUSTOM carries its own" not in c:
+    if old_ret in c:
         c = c.replace(old_ret, new_ret, 1)
         changed = True
         print("✓ CoreOutboundBuilder: skip global mux override for CUSTOM")
@@ -553,20 +564,22 @@ def patch_serverproxychain_activity():
         changed = True
         print("✓ ServerProxyChainActivity: CUSTOM added to picker")
 
-    old_valid = '''        val invalidMembers = chainMembers.filter { member ->
-            val profile = SettingsManager.getServerViaRemarks(member)
-            profile == null || profile.configType.isComplexType()
-        }'''
-    new_valid = '''        val invalidMembers = chainMembers.filter { member ->
-            val profile = SettingsManager.getServerViaRemarks(member)
-            profile == null ||
-                    profile.configType == EConfigType.POLICYGROUP ||
-                    profile.configType == EConfigType.PROXYCHAIN
-        }'''
-    if old_valid in c:
-        c = c.replace(old_valid, new_valid, 1)
+    # Replace either isComplexType() or isGroupType() in the validation block
+    old_valid_re = re.compile(
+        r'profile\s*==\s*null\s*\|\|\s*profile\.configType\.(?:isComplexType|isGroupType)\(\)'
+    )
+    new_valid = (
+        'profile == null ||\n'
+        '                    profile.configType == EConfigType.POLICYGROUP ||\n'
+        '                    profile.configType == EConfigType.PROXYCHAIN'
+    )
+    c2, n = old_valid_re.subn(new_valid, c)
+    if n > 0:
+        c = c2
         changed = True
         print("✓ ServerProxyChainActivity: validation accepts CUSTOM")
+    else:
+        print("• ServerProxyChainActivity: validation already updated or not matched")
 
     if changed:
         backup_kotlin(p)
