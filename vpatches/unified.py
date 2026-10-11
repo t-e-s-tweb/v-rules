@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-v2rayNG patcher for 2dust/v2rayNG master
+v2rayNG patcher for 2dust/v2rayNG master — unified.
 
-  • Allow CUSTOM profiles in policy groups / proxy chains / routing
-  • Populate raw JSON for CUSTOM so it can be converted to an outbound
-  • Deduplicate identical chain-hop outbounds
+Enables CUSTOM profiles everywhere they are currently rejected, carries
+their raw JSON losslessly through the whole pipeline, and deduplicates
+identical chain-hop outbounds.
 
-Idempotent. Self-healing for files already touched by earlier runs.
-Uses inline `!= EConfigType.POLICYGROUP && != EConfigType.PROXYCHAIN`
-checks so no extension-function imports are required.
+Replaces the two previously separate patchers. Idempotent: safe to run
+on clean master, or after either prior patcher.
 """
 
 import re
@@ -21,29 +20,32 @@ BASE = Path("V2rayNG")
 
 
 def backup_kotlin(p: Path):
-    if p.suffix == ".kt":
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        bak = p.with_suffix(f".kt.bak.{ts}")
-        shutil.copy2(p, bak)
-        print(f"  backup: {bak.name}")
+    if p.suffix != ".kt":
+        return
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    bak = p.with_suffix(f".kt.bak.{ts}")
+    shutil.copy2(p, bak)
+    print(f"  backup: {bak.name}")
 
 
-def read(p):
+def read(p: Path) -> str:
     return p.read_text(encoding="utf-8")
 
 
-def write(p, s):
+def write(p: Path, s: str) -> None:
     p.write_text(s, encoding="utf-8")
 
 
 def _has_real_field(c: str, field: str) -> bool:
-    """True only when the field is declared, not merely referenced or in a comment."""
-    return re.search(rf'(?m)^\s*(@Transient\s+)?(var|val)\s+{re.escape(field)}\b', c) is not None
+    """Match a real declaration, not a docstring reference."""
+    return re.search(
+        rf'(?m)^\s*(@Transient\s+)?(var|val)\s+{re.escape(field)}\b', c
+    ) is not None
 
 
-# ----------------------------------------------------------------------
-# 1. ProfileItem.kt – transient field carrying the raw CUSTOM JSON
-# ----------------------------------------------------------------------
+# ======================================================================
+# A. Data model
+# ======================================================================
 def patch_profileitem():
     p = BASE / "app/src/main/java/com/v2ray/ang/dto/entities/ProfileItem.kt"
     if not p.exists():
@@ -65,8 +67,8 @@ def patch_profileitem():
      * extract the proxy outbound when a CUSTOM profile is used as a
      * sub-outbound (chain, policy-group member, routing target).
      *
-     * `kotlin.jvm.Transient` marks the backing field transient so Gson
-     * skips it on encode — no need to strip it in encodeServerConfig.
+     * @Transient marks the backing field transient so Gson skips it on
+     * encode — no need to strip it in encodeServerConfig.
      */
     @Transient
     var customConfigRaw: String? = null
@@ -81,12 +83,66 @@ def patch_profileitem():
         write(p, c)
         print("✓ ProfileItem: added transient customConfigRaw")
     else:
-        print("⚠ ProfileItem: companion object not found — patch manually")
+        print("⚠ ProfileItem: companion object not found")
 
 
-# ----------------------------------------------------------------------
-# 2. MmkvManager.kt – populate customConfigRaw on decode
-# ----------------------------------------------------------------------
+def patch_v2rayconfig_rawjson():
+    p = BASE / "app/src/main/java/com/v2ray/ang/dto/V2rayConfig.kt"
+    if not p.exists():
+        print("✗ V2rayConfig.kt not found")
+        return
+    c = read(p)
+
+    if "var rawJson" in c:
+        print("• V2rayConfig: rawJson already present")
+        return
+
+    if "import com.google.gson.JsonObject" not in c:
+        anchor = "import com.google.gson.annotations.SerializedName"
+        if anchor in c:
+            c = c.replace(
+                anchor,
+                "import com.google.gson.JsonObject\n" + anchor,
+                1,
+            )
+
+    old = '''    data class OutboundBean(
+        var tag: String = "proxy",
+        var protocol: String,
+        var settings: OutSettingsBean? = null,
+        var streamSettings: StreamSettingsBean? = null,
+        val sendThrough: String? = null,
+        var mux: MuxBean? = MuxBean(false),
+        var targetStrategy: String? = null
+    ) {'''
+    new = '''    data class OutboundBean(
+        var tag: String = "proxy",
+        var protocol: String,
+        var settings: OutSettingsBean? = null,
+        var streamSettings: StreamSettingsBean? = null,
+        val sendThrough: String? = null,
+        var mux: MuxBean? = MuxBean(false),
+        var targetStrategy: String? = null
+    ) {
+        /**
+         * Raw JSON of a CUSTOM outbound. When set, CoreConfigManager
+         * substitutes this object into the serialized config instead of
+         * the typed fields above, preserving protocol-specific settings
+         * (masque, tuic, ...) that the app's data model does not know
+         * about. @Transient keeps Gson from ever emitting it.
+         */
+        @Transient
+        var rawJson: JsonObject? = null
+'''
+    if old in c:
+        c = c.replace(old, new, 1)
+        backup_kotlin(p)
+        write(p, c)
+        print("✓ V2rayConfig: added @Transient rawJson to OutboundBean")
+    else:
+        print("⚠ V2rayConfig: OutboundBean declaration not matched")
+
+
 def patch_mmkvmanager():
     p = BASE / "app/src/main/java/com/v2ray/ang/handler/MmkvManager.kt"
     if not p.exists():
@@ -99,11 +155,13 @@ def patch_mmkvmanager():
         return
 
     if "import com.v2ray.ang.enums.EConfigType" not in c:
-        c = c.replace(
-            "import com.v2ray.ang.dto.entities.ProfileItem",
-            "import com.v2ray.ang.dto.entities.ProfileItem\nimport com.v2ray.ang.enums.EConfigType",
-            1,
-        )
+        anchor = "import com.v2ray.ang.dto.entities.ProfileItem"
+        if anchor in c:
+            c = c.replace(
+                anchor,
+                anchor + "\nimport com.v2ray.ang.enums.EConfigType",
+                1,
+            )
 
     old = '''    fun decodeServerConfig(guid: String): ProfileItem? {
         if (guid.isBlank()) {
@@ -138,12 +196,12 @@ def patch_mmkvmanager():
         write(p, c)
         print("✓ MmkvManager: populate customConfigRaw on decode")
     else:
-        print("⚠ MmkvManager: decodeServerConfig body not matched — patch manually")
+        print("⚠ MmkvManager: decodeServerConfig body not matched")
 
 
-# ----------------------------------------------------------------------
-# 3. CoreConfigContextBuilder.kt – allow CUSTOM everywhere it matters
-# ----------------------------------------------------------------------
+# ======================================================================
+# B. Config context builder — allow CUSTOM in every sub-outbound slot
+# ======================================================================
 def patch_coreconfigcontextbuilder():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigContextBuilder.kt"
     if not p.exists():
@@ -152,7 +210,7 @@ def patch_coreconfigcontextbuilder():
     c = read(p)
     changed = False
 
-    # 3a. Remove the CUSTOM short-circuit in resolveOutbound
+    # 1. Remove the early CUSTOM short-circuit in resolveOutbound.
     guard_pat = re.compile(
         r'^[ \t]*if \(profile\.configType == EConfigType\.CUSTOM\) \{\s*'
         r'\n[ \t]*return null\s*\n[ \t]*\}\n',
@@ -164,9 +222,8 @@ def patch_coreconfigcontextbuilder():
         changed = True
         print("✓ CoreConfigContextBuilder: removed CUSTOM guard in resolveOutbound")
 
-    # 3b. Replace the `!isComplexType()` filters so CUSTOM survives the
-    #     type filter. Combined with 3c below, CUSTOM is now kept only if
-    #     it also passes the endpoint / address sanity check.
+    # 2. Replace `!isComplexType()` / `!isGroupType()` type filters so that
+    #    CUSTOM survives. Complements the endpoint filter fix below.
     filt_pat = re.compile(
         r'^(?P<indent>[ \t]*)\.filter\s*\{\s*!\s*it\.configType\.'
         r'(?:isComplexType|isGroupType)\(\)\s*\}',
@@ -185,14 +242,14 @@ def patch_coreconfigcontextbuilder():
         changed = True
         print(f"✓ CoreConfigContextBuilder: replaced {n} complex-type filter(s)")
 
-    # 3c. Relax the endpoint sanity filters. A CUSTOM profile parsed from a
-    #     real Xray config typically has server == null (address lives in
-    #     settings.vnext[0].address, not settings.address), so requiring a
-    #     valid server would drop every CUSTOM profile. Accept CUSTOM as-is
-    #     and keep the strict checks only for non-CUSTOM profiles.
+    # 3. Relax the endpoint sanity filter. A CUSTOM profile parsed from a
+    #    real Xray config typically has `server == null` (the address lives
+    #    in settings.vnext[0].address, not settings.address), so requiring
+    #    a valid server drops every CUSTOM profile before it can be used.
     old_pair = re.compile(
         r'^(?P<indent>[ \t]*)\.filter \{ it\.server\.isNotNullEmpty\(\) \}\s*\n'
-        r'[ \t]*\.filter \{ Utils\.isPureIpAddress\(it\.server!!\) \|\| Utils\.isValidUrl\(it\.server!!\) \}',
+        r'[ \t]*\.filter \{ Utils\.isPureIpAddress\(it\.server!!\) \|\| '
+        r'Utils\.isValidUrl\(it\.server!!\) \}',
         re.MULTILINE,
     )
 
@@ -202,7 +259,8 @@ def patch_coreconfigcontextbuilder():
             f'{indent}.filter {{\n'
             f'{indent}    it.configType == EConfigType.CUSTOM ||\n'
             f'{indent}        (it.server.isNotNullEmpty() &&\n'
-            f'{indent}            (Utils.isPureIpAddress(it.server!!) || Utils.isValidUrl(it.server!!)))\n'
+            f'{indent}            (Utils.isPureIpAddress(it.server!!) '
+            f'|| Utils.isValidUrl(it.server!!)))\n'
             f'{indent}}}'
         )
 
@@ -211,7 +269,7 @@ def patch_coreconfigcontextbuilder():
         changed = True
         print(f"✓ CoreConfigContextBuilder: relaxed server filter for CUSTOM ({n} site(s))")
 
-    # 3d. Fallback outbound: CUSTOM is now allowed as a fallback target too.
+    # 4. Fallback outbound may now be a CUSTOM profile too.
     old_fb = (
         '?.takeUnless { it.configType == EConfigType.CUSTOM '
         '|| it.configType == EConfigType.POLICYGROUP }'
@@ -230,9 +288,46 @@ def patch_coreconfigcontextbuilder():
         write(p, c)
 
 
-# ----------------------------------------------------------------------
-# 4. CoreOutboundBuilder.kt – convert a CUSTOM profile to an outbound
-# ----------------------------------------------------------------------
+# ======================================================================
+# C. Outbound builder — dispatch CUSTOM and produce a lossless outbound
+# ======================================================================
+_LOSSLESS_TO_OUTBOUND_CUSTOM = '''
+    /**
+     * Extracts the proxy outbound from a CUSTOM profile's raw JSON as a
+     * raw JsonObject so protocol-specific fields the app does not model
+     * (masque, tuic, ...) survive intact. The caller assigns a tag and
+     * CoreConfigManager substitutes this object back into the serialized
+     * config.
+     */
+    private fun toOutboundCustom(profileItem: ProfileItem): OutboundBean? {
+        val raw = profileItem.customConfigRaw ?: return null
+        return try {
+            val root = JsonUtil.parseString(raw) ?: return null
+            val outbounds = root.getAsJsonArray("outbounds") ?: return null
+
+            val objs = outbounds
+                .filter { it.isJsonObject }
+                .map { it.asJsonObject }
+            val proxyObj = objs.firstOrNull { it.get("tag")?.asString == AppConfig.TAG_PROXY }
+                ?: objs.firstOrNull { ob ->
+                    val proto = ob.get("protocol")?.asString?.lowercase()
+                    proto != null && proto !in setOf("freedom", "blackhole", "dns")
+                }
+                ?: return null
+
+            val protocol = proxyObj.get("protocol")?.asString ?: return null
+            val bean = OutboundBean(protocol = protocol)
+            bean.tag = ""
+            bean.rawJson = proxyObj.deepCopy()
+            bean
+        } catch (e: Exception) {
+            LogUtil.e(AppConfig.TAG, "Failed to extract outbound from CUSTOM profile", e)
+            null
+        }
+    }
+'''
+
+
 def patch_coreoutboundbuilder():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreOutboundBuilder.kt"
     if not p.exists():
@@ -241,6 +336,8 @@ def patch_coreoutboundbuilder():
     c = read(p)
     changed = False
 
+    # 1. Make sure the outer V2rayConfig type is importable (used for the
+    #    top-level custom-config model).
     if "import com.v2ray.ang.dto.V2rayConfig\n" not in c:
         anchor = "import com.v2ray.ang.dto.V2rayConfig.OutboundBean"
         if anchor in c:
@@ -248,6 +345,7 @@ def patch_coreoutboundbuilder():
             changed = True
             print("✓ CoreOutboundBuilder: added `import com.v2ray.ang.dto.V2rayConfig`")
 
+    # 2. Add dispatch case.
     if "EConfigType.CUSTOM -> toOutboundCustom" not in c:
         old_dispatch = '''            EConfigType.HTTP -> toOutboundHttp(profileItem)
             else -> null'''
@@ -259,6 +357,7 @@ def patch_coreoutboundbuilder():
             changed = True
             print("✓ CoreOutboundBuilder: added CUSTOM dispatch case")
 
+    # 3. Skip global mux override for CUSTOM (it carries its own transport).
     old_ret = '''        outbound ?: return null
         val ret = updateOutboundWithGlobalSettings(outbound)
         if (!ret) return null
@@ -276,141 +375,37 @@ def patch_coreoutboundbuilder():
         changed = True
         print("✓ CoreOutboundBuilder: skip global mux override for CUSTOM")
 
-    if "private fun toOutboundCustom" not in c:
+    # 4. toOutboundCustom — insert if absent, rewrite if the lossy variant
+    #    from the older patcher is present.
+    func_pat = re.compile(
+        r'\n    private fun toOutboundCustom\(profileItem: ProfileItem\): OutboundBean\? '
+        r'\{(?:.|\n)*?\n    \}\n',
+    )
+    m = func_pat.search(c)
+    if m is None:
         last_brace = c.rfind('}')
         if last_brace == -1:
             print("⚠ CoreOutboundBuilder: closing brace not found")
         else:
-            func = '''
-    /**
-     * Extracts the proxy outbound from a CUSTOM profile's raw JSON.
-     * The tag is cleared so the caller can assign its own.
-     */
-    private fun toOutboundCustom(profileItem: ProfileItem): OutboundBean? {
-        val raw = profileItem.customConfigRaw ?: return null
-        return try {
-            val full = JsonUtil.fromJson(raw, V2rayConfig::class.java) ?: return null
-            val proxy = full.getProxyOutbound() ?: return null
-            // Round-trip through JSON to obtain an isolated copy we can
-            // mutate freely without touching the parsed source config.
-            val copy = JsonUtil.fromJson(
-                JsonUtil.toJson(proxy),
-                OutboundBean::class.java
-            ) ?: return null
-            copy.tag = ""
-            copy
-        } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "Failed to extract outbound from CUSTOM profile", e)
-            null
-        }
-    }
-'''
-            c = c[:last_brace] + func + c[last_brace:]
+            c = c[:last_brace] + _LOSSLESS_TO_OUTBOUND_CUSTOM + c[last_brace:]
             changed = True
-            print("✓ CoreOutboundBuilder: added toOutboundCustom")
+            print("✓ CoreOutboundBuilder: inserted lossless toOutboundCustom")
+    elif "bean.rawJson = proxyObj.deepCopy()" in m.group(0):
+        print("• CoreOutboundBuilder: toOutboundCustom already lossless")
+    else:
+        c = c[:m.start()] + _LOSSLESS_TO_OUTBOUND_CUSTOM + c[m.end():]
+        changed = True
+        print("✓ CoreOutboundBuilder: replaced lossy toOutboundCustom")
 
     if changed:
         backup_kotlin(p)
         write(p, c)
 
 
-# ----------------------------------------------------------------------
-# 5. CoreConfigManager.kt – dedup identical chain hops
-# ----------------------------------------------------------------------
-def patch_coreconfigmanager():
-    p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
-    if not p.exists():
-        print("✗ CoreConfigManager.kt not found")
-        return
-    c = read(p)
-    changed = False
-
-    # 5a. Create the dedup map once per build
-    if "val chainHopDedup" not in c:
-        old_loop = '''        configContext.resolvedOutbounds.forEachIndexed { index, spec ->
-            buildOutbounds(
-                resolvedOutbound = spec,
-                prepend = index == 0,
-                existingTags = existingTags,
-                v2rayConfig = v2rayConfig,
-                policyGroupBalancerTags = policyGroupBalancerTags,
-                balancerStrategies = balancerStrategies,
-            )
-        }'''
-        new_loop = '''        // Shared across every chain built in this config: lets identical
-        // hops (e.g. a subscription-wide entry/exit proxy) reuse a single
-        // outbound instead of emitting one per consumer.
-        val chainHopDedup = mutableMapOf<String, String>()
-        configContext.resolvedOutbounds.forEachIndexed { index, spec ->
-            buildOutbounds(
-                resolvedOutbound = spec,
-                prepend = index == 0,
-                existingTags = existingTags,
-                v2rayConfig = v2rayConfig,
-                policyGroupBalancerTags = policyGroupBalancerTags,
-                balancerStrategies = balancerStrategies,
-                chainHopDedup = chainHopDedup,
-            )
-        }'''
-        if old_loop in c:
-            c = c.replace(old_loop, new_loop, 1)
-            changed = True
-            print("✓ CoreConfigManager: created chainHopDedup map")
-
-    # 5b. Extend buildOutbounds signature
-    old_sig = '''    private fun buildOutbounds(
-        resolvedOutbound: CoreConfigContext.ResolvedOutbound,
-        prepend: Boolean,
-        existingTags: MutableSet<String>,
-        v2rayConfig: V2rayConfig,
-        policyGroupBalancerTags: MutableMap<String, String>,
-        balancerStrategies: MutableList<BalancerStrategy>,
-    ) {'''
-    new_sig = '''    private fun buildOutbounds(
-        resolvedOutbound: CoreConfigContext.ResolvedOutbound,
-        prepend: Boolean,
-        existingTags: MutableSet<String>,
-        v2rayConfig: V2rayConfig,
-        policyGroupBalancerTags: MutableMap<String, String>,
-        balancerStrategies: MutableList<BalancerStrategy>,
-        chainHopDedup: MutableMap<String, String>,
-    ) {'''
-    if old_sig in c:
-        c = c.replace(old_sig, new_sig, 1)
-        changed = True
-        print("✓ CoreConfigManager: extended buildOutbounds signature")
-
-    # 5c. Forward to chain handler
-    old_chain_call = '''            CoreResolvedType.PROXYCHAIN -> handleProxyChainResolvedOutbound(
-                resolvedOutbound = resolvedOutbound,
-                prepend = prepend,
-                existingTags = existingTags,
-                v2rayConfig = v2rayConfig,
-            )'''
-    new_chain_call = '''            CoreResolvedType.PROXYCHAIN -> handleProxyChainResolvedOutbound(
-                resolvedOutbound = resolvedOutbound,
-                prepend = prepend,
-                existingTags = existingTags,
-                v2rayConfig = v2rayConfig,
-                chainHopDedup = chainHopDedup,
-            )'''
-    if old_chain_call in c:
-        c = c.replace(old_chain_call, new_chain_call, 1)
-        changed = True
-        print("✓ CoreConfigManager: forwarded chainHopDedup to chain handler")
-
-    # 5d. Rewrite handleProxyChainResolvedOutbound + add signature helper.
-    old_handler_pat = re.compile(
-        r'    private fun handleProxyChainResolvedOutbound\(\s*'
-        r'resolvedOutbound: CoreConfigContext\.ResolvedOutbound,\s*'
-        r'prepend: Boolean,\s*'
-        r'existingTags: MutableSet<String>,\s*'
-        r'v2rayConfig: V2rayConfig,\s*'
-        r'\) \{(?:.|\n)*?\n    \}',
-    )
-    m = old_handler_pat.search(c)
-    if m and "chainHopDedup: MutableMap<String, String>" not in m.group(0):
-        new_handler = '''    private fun handleProxyChainResolvedOutbound(
+# ======================================================================
+# D. Config manager — chain-hop dedup + raw-JSON substitution
+# ======================================================================
+_NEW_CHAIN_HANDLER = '''    private fun handleProxyChainResolvedOutbound(
         resolvedOutbound: CoreConfigContext.ResolvedOutbound,
         prepend: Boolean,
         existingTags: MutableSet<String>,
@@ -441,7 +436,7 @@ def patch_coreconfigmanager():
         // Compute a suffix signature for every hop: content of this hop
         // concatenated with the signature of everything after it. Two
         // chains that share a suffix produce the same signature at the
-        // first shared index, letting us reuse a single outbound.
+        // first shared index, letting a single outbound serve both.
         val suffixSig = arrayOfNulls<String>(n + 1)
         suffixSig[n] = ""
         for (i in n - 1 downTo 0) {
@@ -480,10 +475,11 @@ def patch_coreconfigmanager():
                         AppConfig.TAG,
                         "PROXYCHAIN resolved outbound '${resolvedOutbound.tag}' has colliding hop tags, skipping"
                     )
-                    // Roll back the tags we just added for this chain so a
-                    // later successful chain can reuse them.
+                    // Roll back this chain's just-added tags so a later
+                    // successful chain can reuse the suffixes.
                     newHops.forEach { existingTags.remove(it.tag) }
-                    chainHopDedup.entries.removeAll { it.value in newHops.map { h -> h.tag } }
+                    val removedTags = newHops.map { it.tag }.toSet()
+                    chainHopDedup.entries.removeAll { it.value in removedTags }
                     return
                 }
                 hop.tag = newTag
@@ -494,13 +490,12 @@ def patch_coreconfigmanager():
             }
         }
 
-        // Wire dialerProxy on each newly added hop to its successor. Reused
-        // (deduped) hops are already wired from the chain that first emitted
-        // them, but a newly-added hop immediately before a reused hop needs
-        // to point at the reused hop's tag, which we do here.
-        newHops.forEachIndexed { idx, outbound ->
+        // Wire dialerProxy on each newly-added hop to its successor. The
+        // successor may be a hop reused from a previous chain, so we look
+        // it up by index in the original chainOutbounds list.
+        newHops.forEach { outbound ->
             val chainIndex = chainOutbounds.indexOf(outbound)
-            if (chainIndex < n - 1) {
+            if (chainIndex in 0 until n - 1) {
                 outbound.ensureSockopt().dialerProxy = chainTags[chainIndex + 1]
             }
         }
@@ -513,11 +508,20 @@ def patch_coreconfigmanager():
     }
 
     /**
-     * Canonical content signature of an outbound. Ignores the tag and the
-     * chain-specific dialerProxy so identical hops compare equal regardless
-     * of where they appear in a chain.
+     * Canonical content signature of an outbound. Ignores tag and any
+     * chain-specific dialerProxy so identical hops compare equal. For
+     * CUSTOM sub-outbounds whose real payload is rawJson, signs the raw
+     * JSON instead of the (empty) typed fields.
      */
     private fun outboundContentSignature(outbound: V2rayConfig.OutboundBean): String {
+        outbound.rawJson?.let { raw ->
+            val copy = raw.deepCopy()
+            copy.remove("tag")
+            copy.getAsJsonObject("streamSettings")
+                ?.getAsJsonObject("sockopt")
+                ?.remove("dialerProxy")
+            return copy.toString()
+        }
         val json = try {
             JsonUtil.toJson(outbound)
         } catch (_: Exception) {
@@ -533,21 +537,184 @@ def patch_coreconfigmanager():
             ?.getAsJsonObject("sockopt")
             ?.remove("dialerProxy")
         return obj.toString()
-    }'''
-        c = c[:m.start()] + new_handler + c[m.end():]
+    }
+'''
+
+
+def patch_coreconfigmanager():
+    p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigManager.kt"
+    if not p.exists():
+        print("✗ CoreConfigManager.kt not found")
+        return
+    c = read(p)
+    changed = False
+
+    # ---- 1. chainHopDedup map creation --------------------------------
+    if "val chainHopDedup" not in c:
+        old_loop = '''        configContext.resolvedOutbounds.forEachIndexed { index, spec ->
+            buildOutbounds(
+                resolvedOutbound = spec,
+                prepend = index == 0,
+                existingTags = existingTags,
+                v2rayConfig = v2rayConfig,
+                policyGroupBalancerTags = policyGroupBalancerTags,
+                balancerStrategies = balancerStrategies,
+            )
+        }'''
+        new_loop = '''        // Shared across every chain built in this config: lets identical
+        // hops (e.g. a subscription-wide entry/exit proxy) reuse a single
+        // outbound instead of emitting one per consumer.
+        val chainHopDedup = mutableMapOf<String, String>()
+        configContext.resolvedOutbounds.forEachIndexed { index, spec ->
+            buildOutbounds(
+                resolvedOutbound = spec,
+                prepend = index == 0,
+                existingTags = existingTags,
+                v2rayConfig = v2rayConfig,
+                policyGroupBalancerTags = policyGroupBalancerTags,
+                balancerStrategies = balancerStrategies,
+                chainHopDedup = chainHopDedup,
+            )
+        }'''
+        if old_loop in c:
+            c = c.replace(old_loop, new_loop, 1)
+            changed = True
+            print("✓ CoreConfigManager: created chainHopDedup map")
+
+    # ---- 2. Extend buildOutbounds signature ---------------------------
+    old_sig = '''    private fun buildOutbounds(
+        resolvedOutbound: CoreConfigContext.ResolvedOutbound,
+        prepend: Boolean,
+        existingTags: MutableSet<String>,
+        v2rayConfig: V2rayConfig,
+        policyGroupBalancerTags: MutableMap<String, String>,
+        balancerStrategies: MutableList<BalancerStrategy>,
+    ) {'''
+    new_sig = '''    private fun buildOutbounds(
+        resolvedOutbound: CoreConfigContext.ResolvedOutbound,
+        prepend: Boolean,
+        existingTags: MutableSet<String>,
+        v2rayConfig: V2rayConfig,
+        policyGroupBalancerTags: MutableMap<String, String>,
+        balancerStrategies: MutableList<BalancerStrategy>,
+        chainHopDedup: MutableMap<String, String>,
+    ) {'''
+    if old_sig in c:
+        c = c.replace(old_sig, new_sig, 1)
+        changed = True
+        print("✓ CoreConfigManager: extended buildOutbounds signature")
+
+    # ---- 3. Forward chainHopDedup into the chain branch ---------------
+    old_chain_call = '''            CoreResolvedType.PROXYCHAIN -> handleProxyChainResolvedOutbound(
+                resolvedOutbound = resolvedOutbound,
+                prepend = prepend,
+                existingTags = existingTags,
+                v2rayConfig = v2rayConfig,
+            )'''
+    new_chain_call = '''            CoreResolvedType.PROXYCHAIN -> handleProxyChainResolvedOutbound(
+                resolvedOutbound = resolvedOutbound,
+                prepend = prepend,
+                existingTags = existingTags,
+                v2rayConfig = v2rayConfig,
+                chainHopDedup = chainHopDedup,
+            )'''
+    if old_chain_call in c:
+        c = c.replace(old_chain_call, new_chain_call, 1)
+        changed = True
+        print("✓ CoreConfigManager: forwarded chainHopDedup to chain handler")
+
+    # ---- 4. Replace handleProxyChainResolvedOutbound -------------------
+    handler_pat = re.compile(
+        r'    private fun handleProxyChainResolvedOutbound\(\s*'
+        r'resolvedOutbound: CoreConfigContext\.ResolvedOutbound,\s*'
+        r'prepend: Boolean,\s*'
+        r'existingTags: MutableSet<String>,\s*'
+        r'v2rayConfig: V2rayConfig,'
+        r'(?:\s*chainHopDedup: MutableMap<String, String>,)?\s*'
+        r'\) \{(?:.|\n)*?\n    \}',
+    )
+    m = handler_pat.search(c)
+    if m is None:
+        print("⚠ CoreConfigManager: handleProxyChainResolvedOutbound not found")
+    elif "chainHopDedup: MutableMap<String, String>" in m.group(0):
+        print("• CoreConfigManager: handleProxyChainResolvedOutbound already unified")
+    else:
+        c = c[:m.start()] + _NEW_CHAIN_HANDLER.rstrip() + c[m.end():]
         changed = True
         print("✓ CoreConfigManager: rewrote handleProxyChainResolvedOutbound with dedup")
-    else:
-        print("• CoreConfigManager: handleProxyChainResolvedOutbound already rewritten")
+
+    # ---- 5. toConfigResult: substitute raw JSON back into output ------
+    if "substituteRawOutbounds" not in c:
+        old_tcr = '''    private fun toConfigResult(configContext: CoreConfigContext, v2rayConfig: V2rayConfig): ConfigResult {
+        return ConfigResult(
+            status = true,
+            guid = configContext.guid,
+            content = JsonUtil.toJsonPretty(v2rayConfig) ?: ""
+        )
+    }'''
+        new_tcr = '''    private fun toConfigResult(configContext: CoreConfigContext, v2rayConfig: V2rayConfig): ConfigResult {
+        val serialized = JsonUtil.toJsonPretty(v2rayConfig) ?: ""
+        val content = substituteRawOutbounds(serialized, v2rayConfig)
+        return ConfigResult(
+            status = true,
+            guid = configContext.guid,
+            content = content
+        )
+    }
+
+    /**
+     * Replaces any outbound carrying a raw JSON payload with that payload,
+     * so CUSTOM sub-outbounds (masque, tuic, ...) round-trip losslessly
+     * through the config pipeline. The typed tag and any chain-mutation
+     * (dialerProxy) are overlaid on top of the raw JSON.
+     */
+    private fun substituteRawOutbounds(json: String, v2rayConfig: V2rayConfig): String {
+        val rawByTag = v2rayConfig.outbounds
+            .filter { it.rawJson != null }
+            .associateBy({ it.tag }, { it })
+        if (rawByTag.isEmpty()) return json
+
+        val root = JsonUtil.parseString(json) ?: return json
+        val outbounds = root.getAsJsonArray("outbounds") ?: return json
+        for (i in 0 until outbounds.size()) {
+            val ob = outbounds.get(i).takeIf { it.isJsonObject }?.asJsonObject ?: continue
+            val tag = ob.get("tag")?.asString ?: continue
+            val bean = rawByTag[tag] ?: continue
+
+            // Deep-copy so the profile's cached raw JSON is never mutated.
+            val replacement = bean.rawJson!!.deepCopy()
+            replacement.addProperty("tag", tag)
+
+            // Preserve the chain dialerProxy the pipeline wired onto the
+            // typed bean.
+            val dialerProxy = bean.streamSettings?.sockopt?.dialerProxy
+            if (!dialerProxy.isNullOrEmpty()) {
+                val streamSettings = replacement.getAsJsonObject("streamSettings")
+                    ?: JsonObject().also { replacement.add("streamSettings", it) }
+                val sockopt = streamSettings.getAsJsonObject("sockopt")
+                    ?: JsonObject().also { streamSettings.add("sockopt", it) }
+                sockopt.addProperty("dialerProxy", dialerProxy)
+            }
+
+            outbounds.set(i, replacement)
+        }
+        return JsonUtil.toJsonPretty(root) ?: json
+    }'''
+        if old_tcr in c:
+            c = c.replace(old_tcr, new_tcr, 1)
+            changed = True
+            print("✓ CoreConfigManager: added substituteRawOutbounds")
+        else:
+            print("⚠ CoreConfigManager: toConfigResult body not matched")
 
     if changed:
         backup_kotlin(p)
         write(p, c)
 
 
-# ----------------------------------------------------------------------
-# 6. UI pickers – no longer exclude CUSTOM
-# ----------------------------------------------------------------------
+# ======================================================================
+# E. UI pickers — allow CUSTOM in chain / routing / subscription pickers
+# ======================================================================
 def patch_serverproxychain_activity():
     p = BASE / "app/src/main/java/com/v2ray/ang/ui/server/ServerProxyChainActivity.kt"
     if not p.exists():
@@ -594,20 +761,26 @@ def patch_routingedit_activity():
     c = read(p)
 
     old = '        val profileRemarks = SettingsManager.getProfileRemarks()'
-    new = ('        val profileRemarks = SettingsManager.getProfileRemarks(\n'
-           '            excludeConfigTypes = setOf(EConfigType.POLICYGROUP, EConfigType.PROXYCHAIN)\n'
-           '        )')
+    new = (
+        '        val profileRemarks = SettingsManager.getProfileRemarks(\n'
+        '            excludeConfigTypes = setOf(EConfigType.POLICYGROUP, EConfigType.PROXYCHAIN)\n'
+        '        )'
+    )
     if old in c:
         c = c.replace(old, new, 1)
         if "import com.v2ray.ang.enums.EConfigType" not in c:
-            c = c.replace(
-                "import com.v2ray.ang.dto.entities.RulesetItem",
-                "import com.v2ray.ang.dto.entities.RulesetItem\nimport com.v2ray.ang.enums.EConfigType",
-                1,
-            )
+            anchor = "import com.v2ray.ang.dto.entities.RulesetItem"
+            if anchor in c:
+                c = c.replace(
+                    anchor,
+                    anchor + "\nimport com.v2ray.ang.enums.EConfigType",
+                    1,
+                )
         backup_kotlin(p)
         write(p, c)
         print("✓ RoutingEditActivity: CUSTOM added to picker")
+    else:
+        print("• RoutingEditActivity: already updated or not matched")
 
 
 def patch_subedit_activity():
@@ -635,23 +808,38 @@ def patch_subedit_activity():
         backup_kotlin(p)
         write(p, c)
         print("✓ SubEditActivity: CUSTOM added to entry/exit pickers")
+    else:
+        print("• SubEditActivity: already updated or not matched")
 
 
-# ----------------------------------------------------------------------
+# ======================================================================
 def main():
     print("=" * 70)
-    print("Patcher: CUSTOM everywhere + chain hop dedup")
+    print("Unified patcher: CUSTOM everywhere + lossless JSON + chain dedup")
     print("=" * 70)
     try:
+        # A. Data model
         patch_profileitem()
+        patch_v2rayconfig_rawjson()
         patch_mmkvmanager()
+
+        # B. Config context
         patch_coreconfigcontextbuilder()
+
+        # C. Outbound builder (lossless)
         patch_coreoutboundbuilder()
+
+        # D. Config manager (dedup + substitute)
         patch_coreconfigmanager()
+
+        # E. UI pickers
         patch_serverproxychain_activity()
         patch_routingedit_activity()
         patch_subedit_activity()
+
         print("\n✅ Done. Rebuild and test.")
+        print("   cd V2rayNG && ./gradlew :app:testPlaystoreDebugUnitTest "
+              ":app:compilePlaystoreDebugKotlin")
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback
