@@ -3,13 +3,12 @@
 v2rayNG patcher for 2dust/v2rayNG master
 
   • Allow CUSTOM profiles in policy groups / proxy chains / routing
+  • Populate raw JSON for CUSTOM so it can be converted to an outbound
   • Deduplicate identical chain-hop outbounds
 
-Works on a clean checkout. Self-healing for files already touched by
-earlier runs. Uses inline `!= EConfigType.POLICYGROUP && != EConfigType.PROXYCHAIN`
+Idempotent. Self-healing for files already touched by earlier runs.
+Uses inline `!= EConfigType.POLICYGROUP && != EConfigType.PROXYCHAIN`
 checks so no extension-function imports are required.
-
-Idempotent.
 """
 
 import re
@@ -37,8 +36,13 @@ def write(p, s):
     p.write_text(s, encoding="utf-8")
 
 
+def _has_real_field(c: str, field: str) -> bool:
+    """True only when the field is declared, not merely referenced or in a comment."""
+    return re.search(rf'(?m)^\s*(@Transient\s+)?(var|val)\s+{re.escape(field)}\b', c) is not None
+
+
 # ----------------------------------------------------------------------
-# 1. ProfileItem.kt – transient field to carry the raw CUSTOM config
+# 1. ProfileItem.kt – transient field carrying the raw CUSTOM JSON
 # ----------------------------------------------------------------------
 def patch_profileitem():
     p = BASE / "app/src/main/java/com/v2ray/ang/dto/entities/ProfileItem.kt"
@@ -47,8 +51,8 @@ def patch_profileitem():
         return
     c = read(p)
 
-    if "customConfigRaw" in c:
-        print("• ProfileItem: customConfigRaw already present")
+    if _has_real_field(c, "customConfigRaw"):
+        print("• ProfileItem: customConfigRaw already declared")
         return
 
     old = '''    companion object {
@@ -60,6 +64,9 @@ def patch_profileitem():
      * MmkvManager.decodeServerConfig. Never persisted; used only to
      * extract the proxy outbound when a CUSTOM profile is used as a
      * sub-outbound (chain, policy-group member, routing target).
+     *
+     * `kotlin.jvm.Transient` marks the backing field transient so Gson
+     * skips it on encode — no need to strip it in encodeServerConfig.
      */
     @Transient
     var customConfigRaw: String? = null
@@ -74,7 +81,7 @@ def patch_profileitem():
         write(p, c)
         print("✓ ProfileItem: added transient customConfigRaw")
     else:
-        print("⚠ ProfileItem: companion object not found")
+        print("⚠ ProfileItem: companion object not found — patch manually")
 
 
 # ----------------------------------------------------------------------
@@ -87,7 +94,7 @@ def patch_mmkvmanager():
         return
     c = read(p)
 
-    if "customConfigRaw = serverRawStorage" in c:
+    if re.search(r'item\.customConfigRaw\s*=', c):
         print("• MmkvManager: customConfigRaw already populated")
         return
 
@@ -131,11 +138,11 @@ def patch_mmkvmanager():
         write(p, c)
         print("✓ MmkvManager: populate customConfigRaw on decode")
     else:
-        print("⚠ MmkvManager: decodeServerConfig body not matched")
+        print("⚠ MmkvManager: decodeServerConfig body not matched — patch manually")
 
 
 # ----------------------------------------------------------------------
-# 3. CoreConfigContextBuilder.kt – allow CUSTOM in every sub-outbound slot
+# 3. CoreConfigContextBuilder.kt – allow CUSTOM everywhere it matters
 # ----------------------------------------------------------------------
 def patch_coreconfigcontextbuilder():
     p = BASE / "app/src/main/java/com/v2ray/ang/core/CoreConfigContextBuilder.kt"
@@ -146,18 +153,20 @@ def patch_coreconfigcontextbuilder():
     changed = False
 
     # 3a. Remove the CUSTOM short-circuit in resolveOutbound
-    guard_variants = [
-        '        if (profile.configType == EConfigType.CUSTOM) {\n            return null\n        }\n',
-        '        if (profile.configType == EConfigType.CUSTOM) {\n            return null\n        }\r\n',
-    ]
-    for variant in guard_variants:
-        if variant in c:
-            c = c.replace(variant, "", 1)
-            changed = True
-            print("✓ CoreConfigContextBuilder: removed CUSTOM guard in resolveOutbound")
-            break
+    guard_pat = re.compile(
+        r'^[ \t]*if \(profile\.configType == EConfigType\.CUSTOM\) \{\s*'
+        r'\n[ \t]*return null\s*\n[ \t]*\}\n',
+        re.MULTILINE,
+    )
+    c2, n = guard_pat.subn("", c, count=1)
+    if n > 0:
+        c = c2
+        changed = True
+        print("✓ CoreConfigContextBuilder: removed CUSTOM guard in resolveOutbound")
 
-    # 3b. Replace the member filters, matching isComplexType() OR isGroupType()
+    # 3b. Replace the `!isComplexType()` filters so CUSTOM survives the
+    #     type filter. Combined with 3c below, CUSTOM is now kept only if
+    #     it also passes the endpoint / address sanity check.
     filt_pat = re.compile(
         r'^(?P<indent>[ \t]*)\.filter\s*\{\s*!\s*it\.configType\.'
         r'(?:isComplexType|isGroupType)\(\)\s*\}',
@@ -174,17 +183,35 @@ def patch_coreconfigcontextbuilder():
     c, n = filt_pat.subn(filt_repl, c)
     if n > 0:
         changed = True
-        print(f"✓ CoreConfigContextBuilder: replaced {n} complex-type filter(s) with inline checks")
-    else:
-        if re.search(
-            r'\.filter\s*\{\s*it\.configType\s*!=\s*EConfigType\.POLICYGROUP',
-            c,
-        ):
-            print("• CoreConfigContextBuilder: member filters already inline")
-        else:
-            print("⚠ CoreConfigContextBuilder: member filters not matched")
+        print(f"✓ CoreConfigContextBuilder: replaced {n} complex-type filter(s)")
 
-    # 3c. Relax the fallback outbound takeUnless
+    # 3c. Relax the endpoint sanity filters. A CUSTOM profile parsed from a
+    #     real Xray config typically has server == null (address lives in
+    #     settings.vnext[0].address, not settings.address), so requiring a
+    #     valid server would drop every CUSTOM profile. Accept CUSTOM as-is
+    #     and keep the strict checks only for non-CUSTOM profiles.
+    old_pair = re.compile(
+        r'^(?P<indent>[ \t]*)\.filter \{ it\.server\.isNotNullEmpty\(\) \}\s*\n'
+        r'[ \t]*\.filter \{ Utils\.isPureIpAddress\(it\.server!!\) \|\| Utils\.isValidUrl\(it\.server!!\) \}',
+        re.MULTILINE,
+    )
+
+    def pair_repl(m):
+        indent = m.group("indent")
+        return (
+            f'{indent}.filter {{\n'
+            f'{indent}    it.configType == EConfigType.CUSTOM ||\n'
+            f'{indent}        (it.server.isNotNullEmpty() &&\n'
+            f'{indent}            (Utils.isPureIpAddress(it.server!!) || Utils.isValidUrl(it.server!!)))\n'
+            f'{indent}}}'
+        )
+
+    c, n = old_pair.subn(pair_repl, c)
+    if n > 0:
+        changed = True
+        print(f"✓ CoreConfigContextBuilder: relaxed server filter for CUSTOM ({n} site(s))")
+
+    # 3d. Fallback outbound: CUSTOM is now allowed as a fallback target too.
     old_fb = (
         '?.takeUnless { it.configType == EConfigType.CUSTOM '
         '|| it.configType == EConfigType.POLICYGROUP }'
@@ -197,11 +224,6 @@ def patch_coreconfigcontextbuilder():
         )
         changed = True
         print("✓ CoreConfigContextBuilder: fallback outbound accepts CUSTOM")
-    else:
-        print("• CoreConfigContextBuilder: fallback filter unchanged or already applied")
-
-    if re.search(r'\bisGroupType\s*\(', c):
-        print("⚠ CoreConfigContextBuilder: an isGroupType( call remains somewhere — inspect manually")
 
     if changed:
         backup_kotlin(p)
@@ -219,22 +241,13 @@ def patch_coreoutboundbuilder():
     c = read(p)
     changed = False
 
-    # 4a. Add the outer V2rayConfig import if missing. The file historically
-    #     only imports the nested OutboundBean class.
     if "import com.v2ray.ang.dto.V2rayConfig\n" not in c:
         anchor = "import com.v2ray.ang.dto.V2rayConfig.OutboundBean"
         if anchor in c:
-            c = c.replace(
-                anchor,
-                "import com.v2ray.ang.dto.V2rayConfig\n" + anchor,
-                1,
-            )
+            c = c.replace(anchor, "import com.v2ray.ang.dto.V2rayConfig\n" + anchor, 1)
             changed = True
             print("✓ CoreOutboundBuilder: added `import com.v2ray.ang.dto.V2rayConfig`")
-        else:
-            print("⚠ CoreOutboundBuilder: OutboundBean import anchor not found")
 
-    # 4b. Dispatch
     if "EConfigType.CUSTOM -> toOutboundCustom" not in c:
         old_dispatch = '''            EConfigType.HTTP -> toOutboundHttp(profileItem)
             else -> null'''
@@ -245,12 +258,7 @@ def patch_coreoutboundbuilder():
             c = c.replace(old_dispatch, new_dispatch, 1)
             changed = True
             print("✓ CoreOutboundBuilder: added CUSTOM dispatch case")
-        else:
-            print("⚠ CoreOutboundBuilder: dispatch switch not matched")
-    else:
-        print("• CoreOutboundBuilder: dispatch case already present")
 
-    # 4c. Skip global mux override for CUSTOM
     old_ret = '''        outbound ?: return null
         val ret = updateOutboundWithGlobalSettings(outbound)
         if (!ret) return null
@@ -267,10 +275,7 @@ def patch_coreoutboundbuilder():
         c = c.replace(old_ret, new_ret, 1)
         changed = True
         print("✓ CoreOutboundBuilder: skip global mux override for CUSTOM")
-    else:
-        print("• CoreOutboundBuilder: global-mux skip already present or not matched")
 
-    # 4d. The conversion function
     if "private fun toOutboundCustom" not in c:
         last_brace = c.rfind('}')
         if last_brace == -1:
@@ -303,8 +308,6 @@ def patch_coreoutboundbuilder():
             c = c[:last_brace] + func + c[last_brace:]
             changed = True
             print("✓ CoreOutboundBuilder: added toOutboundCustom")
-    else:
-        print("• CoreOutboundBuilder: toOutboundCustom already present")
 
     if changed:
         backup_kotlin(p)
@@ -353,10 +356,6 @@ def patch_coreconfigmanager():
             c = c.replace(old_loop, new_loop, 1)
             changed = True
             print("✓ CoreConfigManager: created chainHopDedup map")
-        else:
-            print("⚠ CoreConfigManager: buildOutbounds loop not matched")
-    else:
-        print("• CoreConfigManager: chainHopDedup already present")
 
     # 5b. Extend buildOutbounds signature
     old_sig = '''    private fun buildOutbounds(
@@ -380,8 +379,6 @@ def patch_coreconfigmanager():
         c = c.replace(old_sig, new_sig, 1)
         changed = True
         print("✓ CoreConfigManager: extended buildOutbounds signature")
-    else:
-        print("• CoreConfigManager: buildOutbounds signature unchanged or already extended")
 
     # 5c. Forward to chain handler
     old_chain_call = '''            CoreResolvedType.PROXYCHAIN -> handleProxyChainResolvedOutbound(
@@ -401,21 +398,18 @@ def patch_coreconfigmanager():
         c = c.replace(old_chain_call, new_chain_call, 1)
         changed = True
         print("✓ CoreConfigManager: forwarded chainHopDedup to chain handler")
-    else:
-        print("• CoreConfigManager: PROXYCHAIN call already updated or not matched")
 
-    # 5d. Rewrite handleProxyChainResolvedOutbound + add signature helper
+    # 5d. Rewrite handleProxyChainResolvedOutbound + add signature helper.
     old_handler_pat = re.compile(
         r'    private fun handleProxyChainResolvedOutbound\(\s*'
         r'resolvedOutbound: CoreConfigContext\.ResolvedOutbound,\s*'
         r'prepend: Boolean,\s*'
         r'existingTags: MutableSet<String>,\s*'
         r'v2rayConfig: V2rayConfig,\s*'
-        r'\) \{.*?\n    \}',
-        re.DOTALL,
+        r'\) \{(?:.|\n)*?\n    \}',
     )
     m = old_handler_pat.search(c)
-    if m:
+    if m and "chainHopDedup: MutableMap<String, String>" not in m.group(0):
         new_handler = '''    private fun handleProxyChainResolvedOutbound(
         resolvedOutbound: CoreConfigContext.ResolvedOutbound,
         prepend: Boolean,
@@ -446,9 +440,8 @@ def patch_coreconfigmanager():
 
         // Compute a suffix signature for every hop: content of this hop
         // concatenated with the signature of everything after it. Two
-        // chains that share a suffix therefore produce the same signature
-        // at the first shared index, which lets us reuse a single outbound
-        // for that suffix.
+        // chains that share a suffix produce the same signature at the
+        // first shared index, letting us reuse a single outbound.
         val suffixSig = arrayOfNulls<String>(n + 1)
         suffixSig[n] = ""
         for (i in n - 1 downTo 0) {
@@ -469,10 +462,10 @@ def patch_coreconfigmanager():
         chainOutbounds[0].tag = resolvedOutbound.tag
         existingTags.add(resolvedOutbound.tag)
 
-        val newHops = mutableListOf<Pair<Int, V2rayConfig.OutboundBean>>()
-        newHops.add(0 to chainOutbounds[0])
         val chainTags = MutableList(n) { "" }
         chainTags[0] = resolvedOutbound.tag
+        val newHops = mutableListOf<V2rayConfig.OutboundBean>()
+        newHops.add(chainOutbounds[0])
 
         for (i in 1 until n) {
             val hop = chainOutbounds[i]
@@ -480,7 +473,6 @@ def patch_coreconfigmanager():
             val existingTag = chainHopDedup[sig]
             if (existingTag != null) {
                 chainTags[i] = existingTag
-                // Hop outbound already lives in the config from a prior chain.
             } else {
                 val newTag = "${AppConfig.TAG_PROXY}-${resolvedOutbound.tag}-$i"
                 if (newTag in existingTags) {
@@ -488,28 +480,35 @@ def patch_coreconfigmanager():
                         AppConfig.TAG,
                         "PROXYCHAIN resolved outbound '${resolvedOutbound.tag}' has colliding hop tags, skipping"
                     )
+                    // Roll back the tags we just added for this chain so a
+                    // later successful chain can reuse them.
+                    newHops.forEach { existingTags.remove(it.tag) }
+                    chainHopDedup.entries.removeAll { it.value in newHops.map { h -> h.tag } }
                     return
                 }
                 hop.tag = newTag
                 chainTags[i] = newTag
-                newHops.add(i to hop)
+                newHops.add(hop)
                 existingTags.add(newTag)
                 chainHopDedup[sig] = newTag
             }
         }
 
-        // Wire dialerProxy on each newly added hop to its successor.
-        newHops.forEach { (idx, outbound) ->
-            if (idx < n - 1) {
-                outbound.ensureSockopt().dialerProxy = chainTags[idx + 1]
+        // Wire dialerProxy on each newly added hop to its successor. Reused
+        // (deduped) hops are already wired from the chain that first emitted
+        // them, but a newly-added hop immediately before a reused hop needs
+        // to point at the reused hop's tag, which we do here.
+        newHops.forEachIndexed { idx, outbound ->
+            val chainIndex = chainOutbounds.indexOf(outbound)
+            if (chainIndex < n - 1) {
+                outbound.ensureSockopt().dialerProxy = chainTags[chainIndex + 1]
             }
         }
 
-        val toAdd = newHops.map { it.second }
         if (prepend) {
-            v2rayConfig.outbounds.addAll(0, toAdd)
+            v2rayConfig.outbounds.addAll(0, newHops)
         } else {
-            v2rayConfig.outbounds.addAll(toAdd)
+            v2rayConfig.outbounds.addAll(newHops)
         }
     }
 
@@ -539,7 +538,7 @@ def patch_coreconfigmanager():
         changed = True
         print("✓ CoreConfigManager: rewrote handleProxyChainResolvedOutbound with dedup")
     else:
-        print("• CoreConfigManager: handleProxyChainResolvedOutbound already rewritten or not matched")
+        print("• CoreConfigManager: handleProxyChainResolvedOutbound already rewritten")
 
     if changed:
         backup_kotlin(p)
@@ -572,17 +571,15 @@ def patch_serverproxychain_activity():
         r'profile\s*==\s*null\s*\|\|\s*profile\.configType\.(?:isComplexType|isGroupType)\(\)'
     )
     new_valid = (
-        'profile == null ||\n'
-        '                    profile.configType == EConfigType.POLICYGROUP ||\n'
-        '                    profile.configType == EConfigType.PROXYCHAIN'
+        '(profile == null) ||\n'
+        '                    (profile.configType == EConfigType.POLICYGROUP) ||\n'
+        '                    (profile.configType == EConfigType.PROXYCHAIN)'
     )
     c2, n = old_valid_re.subn(new_valid, c)
     if n > 0:
         c = c2
         changed = True
         print("✓ ServerProxyChainActivity: validation accepts CUSTOM")
-    else:
-        print("• ServerProxyChainActivity: validation already updated or not matched")
 
     if changed:
         backup_kotlin(p)
@@ -611,8 +608,6 @@ def patch_routingedit_activity():
         backup_kotlin(p)
         write(p, c)
         print("✓ RoutingEditActivity: CUSTOM added to picker")
-    else:
-        print("• RoutingEditActivity: already updated or not matched")
 
 
 def patch_subedit_activity():
@@ -640,12 +635,8 @@ def patch_subedit_activity():
         backup_kotlin(p)
         write(p, c)
         print("✓ SubEditActivity: CUSTOM added to entry/exit pickers")
-    else:
-        print("• SubEditActivity: already updated or not matched")
 
 
-# ----------------------------------------------------------------------
-# Main
 # ----------------------------------------------------------------------
 def main():
     print("=" * 70)
@@ -660,8 +651,7 @@ def main():
         patch_serverproxychain_activity()
         patch_routingedit_activity()
         patch_subedit_activity()
-        print("\n✅ Done.")
-        print("👉 Rebuild and test.")
+        print("\n✅ Done. Rebuild and test.")
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback
